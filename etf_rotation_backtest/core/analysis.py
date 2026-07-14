@@ -16,7 +16,7 @@ import numpy as np
 from .config import INITIAL_CAPITAL, SENSITIVITY_MA_SHORT_RANGE, SENSITIVITY_MA_LONG_RANGE
 
 
-def calc_metrics(nav_df: pd.DataFrame, freq: str = "daily") -> dict:
+def calc_metrics(nav_df: pd.DataFrame, freq: str = "weekly") -> dict:
     """
     计算回测核心指标。
     
@@ -188,8 +188,8 @@ def print_sensitivity_results(sens_df: pd.DataFrame):
     
     # 稳健性判断
     if profitable_pct > 70:
-        print(f"\n✅ 策略稳健性: 好（{profitable_pct:.0f}%参数组合盈利）")
+        print(f"\n[GOOD] 策略稳健性: 好（{profitable_pct:.0f}%参数组合盈利）")
     elif profitable_pct > 50:
-        print(f"\n⚠️ 策略稳健性: 一般（{profitable_pct:.0f}%参数组合盈利）")
+        print(f"\n[WARN] 策略稳健性: 一般（{profitable_pct:.0f}%参数组合盈利）")
     else:
-        print(f"\n❌ 策略稳健性: 差（仅{profitable_pct:.0f}%参数组合盈利）")
+        print(f"\n[BAD] 策略稳健性: 差（仅{profitable_pct:.0f}%参数组合盈利）")

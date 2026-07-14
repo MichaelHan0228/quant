@@ -17,7 +17,7 @@
 """
 
 import pandas as pd
-from .config import INITIAL_CAPITAL, DEFAULT_MA_SHORT, DEFAULT_MA_LONG
+from .config import INITIAL_CAPITAL, DEFAULT_MA_SHORT, DEFAULT_MA_LONG, DAILY_DROP_THRESHOLD
 from .signals import calc_signals
 from .risk_control import (
     check_stop_loss, check_portfolio_stop_loss,
@@ -120,13 +120,19 @@ def execute_trades(all_data: dict, holdings: dict, capital: float,
             del holdings[code]
     
     # === 买入 ===
+    # 用执行日（周一开盘）的价格重新计算组合市值，确保仓位准确
+    portfolio_value_at_exec = capital
+    for code, holding in holdings.items():
+        open_price, _ = get_next_trading_day(all_data, code, sig_date)
+        if open_price:
+            portfolio_value_at_exec += holding["shares"] * open_price
+
     codes_to_buy = target_codes - set(holdings.keys())
     for code in codes_to_buy:
         open_price, _ = get_next_trading_day(all_data, code, sig_date)
         if open_price:
             buy_price = calc_buy_price(open_price, code)  # 加上价差
-            portfolio_value = calc_portfolio_value(holdings, capital, all_data, sig_date)
-            target_value = portfolio_value * target_weights[code]
+            target_value = portfolio_value_at_exec * target_weights[code]
             buy_shares = int(target_value / buy_price / 100) * 100  # 整手
             
             if buy_shares > 0:
@@ -200,6 +206,16 @@ def run_backtest(all_data: dict, start_date: str, end_date: str,
         portfolio_reduce, high_water_mark, current_dd = check_portfolio_stop_loss(
             capital, holdings, all_data, sig_date, high_water_mark
         )
+        # 第三层：单日暴跌紧急止损（检查本周内是否发生过单日跌幅>5%）
+        for code in list(holdings.keys()):
+            if code not in stop_codes:
+                df = all_data[code]
+                mask = df["date"] <= pd.Timestamp(sig_date)
+                week_data = df[mask].tail(5)  # 最近一周的数据
+                if len(week_data) >= 2:
+                    daily_returns = week_data["close"].pct_change().dropna()
+                    if (daily_returns < DAILY_DROP_THRESHOLD).any():
+                        stop_codes.append(code)
         
         # === 3. 计算信号 ===
         signals = calc_signals(all_data, sig_date, ma_short, ma_long)
@@ -212,13 +228,15 @@ def run_backtest(all_data: dict, start_date: str, end_date: str,
         qualified = signals[signals["trend_up"]].copy()
         qualified = qualified.sort_values("risk_adj_mom", ascending=False)
         vol_pct = signals.iloc[0]["vol_percentile"]
-        
-        # 动态决定持仓数量
-        top_n = calc_dynamic_positions(qualified, vol_pct)
-        selected_codes = qualified.head(top_n)["code"].tolist()
-        
-        # 相关性过滤
-        selected_codes = filter_by_correlation(selected_codes, all_data, sig_date)
+
+        # 先做相关性过滤（从动量最高的开始，剔除高相关的）
+        all_trending_codes = qualified["code"].tolist()
+        filtered_codes = filter_by_correlation(all_trending_codes, all_data, sig_date)
+
+        # 用过滤后的列表重建qualified，再决定持仓数
+        qualified_filtered = qualified[qualified["code"].isin(filtered_codes)]
+        top_n = calc_dynamic_positions(qualified_filtered, vol_pct)
+        selected_codes = qualified_filtered.head(top_n)["code"].tolist()
         
         # 构建目标权重
         target_weights = {}
@@ -240,8 +258,8 @@ def run_backtest(all_data: dict, start_date: str, end_date: str,
             target_weights = {c: w * 0.5 for c, w in target_weights.items()}
         
         # === 5. 信号触发式调仓 ===
-        if target_weights == last_target_weights:
-            # 信号没变，不调仓，只记录净值
+        if set(target_weights.keys()) == set(last_target_weights.keys()):
+            # 持仓代码没变，不调仓，只记录净值
             final_value = calc_portfolio_value(holdings, capital, all_data, sig_date)
             nav_history.append({"date": sig_date, "nav": final_value})
             if not silent and ((i + 1) % 20 == 0 or i == len(signal_dates) - 1):

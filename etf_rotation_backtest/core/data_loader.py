@@ -105,17 +105,17 @@ def load_all_data(start_date: str = "2023-01-01") -> dict:
         
         # 数据质量检查
         if df.empty or len(df) < 60:
-            print("✗ 数据不足")
+            print("[FAIL] 数据不足")
             continue
         
         # 过滤到指定起始日期之后
         df = df[df["date"] >= start_date].reset_index(drop=True)
         if len(df) < 30:
-            print(f"✗ 过滤后不足({len(df)}条)")
+            print(f"[FAIL] 过滤后不足({len(df)}条)")
             continue
         
         all_data[code] = df
-        print(f"✓ {len(df)}条 | {df['date'].iloc[0].strftime('%Y-%m-%d')} ~ {df['date'].iloc[-1].strftime('%Y-%m-%d')}")
+        print(f"[OK] {len(df)}条 | {df['date'].iloc[0].strftime('%Y-%m-%d')} ~ {df['date'].iloc[-1].strftime('%Y-%m-%d')}")
     
     print(f"\n成功加载 {len(all_data)} 个ETF\n")
     return all_data

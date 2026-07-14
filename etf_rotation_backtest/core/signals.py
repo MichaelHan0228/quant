@@ -65,7 +65,7 @@ def calc_multi_period_momentum(df: pd.DataFrame, current_idx: int,
             combined += weight * mom
             total_weight += weight
     
-    return round(combined / total_weight * 100 / 100, 2) if total_weight > 0 else 0
+    return round(combined / total_weight, 2) if total_weight > 0 else 0
 
 
 def calc_risk_adj_momentum(df: pd.DataFrame, current_idx: int,
