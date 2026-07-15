@@ -13,13 +13,13 @@
   - 避免数据穿越：周五算信号，周一执行
   - 部分调仓：只操作差异部分，减少换手
   - 信号触发式调仓：信号没变不调仓
-  - 三层止损：个股止损+组合止损+暴跌反弹止损
+  - 三层止损：个股止损+组合止损+暴跌反弹止损（仅高波动ETF）
 """
 
 import pandas as pd
 from .config import (
     INITIAL_CAPITAL, DEFAULT_MA_SHORT, DEFAULT_MA_LONG,
-    CRASH_THRESHOLD, RECOVERY_THRESHOLD
+    CRASH_THRESHOLD, RECOVERY_THRESHOLD, HIGH_VOLATILITY_ETF
 )
 from .signals import calc_signals
 from .risk_control import (
@@ -62,6 +62,8 @@ def check_weekly_crash_recovery(all_data: dict, code: str, sig_date,
       - 如果反弹程度 >= 50%，不止损（反弹足够）
       - 如果反弹程度 < 50%，止损（反弹不足）
     
+    注意：仅应用于高波动ETF（如恒生科技）
+    
     参数:
         all_data: 所有ETF数据
         code: ETF代码
@@ -74,6 +76,10 @@ def check_weekly_crash_recovery(all_data: dict, code: str, sig_date,
         - need_stop: bool，是否需要止损
         - crash_info: dict，暴跌详情
     """
+    # 只对高波动ETF应用此止损
+    if code not in HIGH_VOLATILITY_ETF:
+        return False, {}
+    
     df = all_data[code]
     mask = df["date"] <= pd.Timestamp(sig_date)
     week_data = df[mask].tail(5)  # 最近5个交易日（周一~周五）
@@ -285,7 +291,7 @@ def run_backtest(all_data: dict, start_date: str, end_date: str,
             capital, holdings, all_data, sig_date, high_water_mark
         )
         
-        # 第三层：暴跌后反弹检查（本周内是否发生过单日跌幅>5%）
+        # 第三层：暴跌后反弹检查（仅高波动ETF）
         for code in list(holdings.keys()):
             if code not in stop_codes:
                 need_stop, crash_info = check_weekly_crash_recovery(
