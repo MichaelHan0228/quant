@@ -9,3 +9,7 @@ dist/
 build/
 .DS_Store
 Thumbs.db
+
+# 数据缓存
+data/
+*.csv

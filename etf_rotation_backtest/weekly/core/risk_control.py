@@ -13,23 +13,20 @@
 """
 
 import pandas as pd
-from .config import (
-    STOP_LOSS_SINGLE, STOP_LOSS_PORTFOLIO,
-    VOL_HIGH_THRESHOLD, VOL_EXTREME_THRESHOLD, MAX_POSITIONS
-)
+from . import config as cfg
 from .utils import get_price_on_date
 
 
 def check_stop_loss(holdings: dict, all_data: dict, date) -> list:
     """
-    第一层止损：个股成本价止损。
+    第一层止损：个股成本价止损（按ETF分档）。
     
     逻辑：
       - 计算每只持仓ETF的浮动盈亏
-      - 如果从买入价下跌超过8%，触发止损
+      - 如果从买入价下跌超过阈值，触发止损
       - 返回需要止损的ETF代码列表
     
-    触发时机：每周五调仓时检查
+    触发时机：每天检查
     
     参数:
         holdings: 持仓字典，{code: {"shares": N, "cost": price}}
@@ -45,7 +42,8 @@ def check_stop_loss(holdings: dict, all_data: dict, date) -> list:
         if price:
             # 计算浮动盈亏
             pnl_pct = (price / holding["cost"] - 1)
-            if pnl_pct < STOP_LOSS_SINGLE:  # 低于-8%
+            stop_loss_threshold = cfg.STOP_LOSS_BY_ETF.get(code, cfg.STOP_LOSS_DEFAULT)
+            if pnl_pct < stop_loss_threshold:  # 按ETF分档止损
                 codes_to_stop.append(code)
     return codes_to_stop
 
@@ -84,7 +82,7 @@ def check_portfolio_stop_loss(capital: float, holdings: dict, all_data: dict,
     drawdown = (portfolio_value / high_water_mark - 1) if high_water_mark > 0 else 0
     
     # 判断是否触发止损
-    need_reduce = drawdown < STOP_LOSS_PORTFOLIO  # 回撤超过10%
+    need_reduce = drawdown < cfg.STOP_LOSS_PORTFOLIO  # 回撤超过10%
     
     return need_reduce, high_water_mark, round(drawdown * 100, 2)
 
@@ -108,9 +106,9 @@ def calc_dynamic_positions(qualified_df: pd.DataFrame,
     n_trending = len(qualified_df)
     
     # 波动率择时
-    if vol_percentile > VOL_EXTREME_THRESHOLD:
+    if vol_percentile > cfg.VOL_EXTREME_THRESHOLD:
         return 0  # 极端高波动，空仓
-    if vol_percentile > VOL_HIGH_THRESHOLD:
+    if vol_percentile > cfg.VOL_HIGH_THRESHOLD:
         return min(1, n_trending)  # 高波动，最多持1个
     
     # 根据趋势数量决定
@@ -124,6 +122,6 @@ def calc_dynamic_positions(qualified_df: pd.DataFrame,
         # 3个以上趋势向上，检查动量强度
         top_mom = qualified_df.iloc[0]["risk_adj_mom"]
         if top_mom > 0.5:  # 动量很强
-            return min(MAX_POSITIONS, n_trending)
+            return min(cfg.MAX_POSITIONS, n_trending)
         else:
             return 2

@@ -92,6 +92,7 @@ def main():
     parser.add_argument("--end", type=str, default=BACKTEST_END, help="回测结束日期")
     parser.add_argument("--ma-short", type=int, default=DEFAULT_MA_SHORT, help="短期均线周期")
     parser.add_argument("--ma-long", type=int, default=DEFAULT_MA_LONG, help="长期均线周期")
+    parser.add_argument("--refresh", action="store_true", help="强制刷新数据缓存")
     args = parser.parse_args()
     
     # 输出目录
@@ -102,7 +103,7 @@ def main():
     print("=" * 60)
     print("ETF轮动策略")
     print("=" * 60)
-    all_data = load_all_data("2023-01-01")
+    all_data = load_all_data(BACKTEST_START, refresh=args.refresh)
     
     if len(all_data) < 3:
         print("ERROR: 可用ETF不足3个")
