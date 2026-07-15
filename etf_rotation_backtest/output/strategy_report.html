@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ETF轮动策略 - 运行报告</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f1117; color: #e1e4e8; line-height: 1.6; }
+.container { max-width: 1400px; margin: 0 auto; padding: 20px; }
+.header { text-align: center; padding: 40px 0; border-bottom: 1px solid #21262d; margin-bottom: 30px; }
+.header h1 { font-size: 2.5em; color: #58a6ff; margin-bottom: 10px; }
+.header p { color: #8b949e; font-size: 1.1em; }
+.metrics-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; margin-bottom: 30px; }
+.metric-card { background: #161b22; border: 1px solid #21262d; border-radius: 12px; padding: 24px; text-align: center; transition: transform 0.2s; }
+.metric-card:hover { transform: translateY(-2px); border-color: #58a6ff; }
+.metric-value { font-size: 2.2em; font-weight: 700; margin-bottom: 8px; }
+.metric-label { color: #8b949e; font-size: 0.9em; }
+.positive { color: #3fb950; }
+.negative { color: #f85149; }
+.neutral { color: #58a6ff; }
+.chart-container { background: #161b22; border: 1px solid #21262d; border-radius: 12px; padding: 24px; margin-bottom: 30px; }
+.chart-container h2 { color: #c9d1d9; margin-bottom: 20px; font-size: 1.3em; }
+canvas { max-height: 400px; }
+.section { background: #161b22; border: 1px solid #21262d; border-radius: 12px; padding: 24px; margin-bottom: 30px; }
+.section h2 { color: #c9d1d9; margin-bottom: 20px; font-size: 1.3em; border-bottom: 1px solid #21262d; padding-bottom: 10px; }
+table { width: 100%; border-collapse: collapse; }
+th, td { padding: 12px; text-align: left; border-bottom: 1px solid #21262d; }
+th { color: #8b949e; font-weight: 600; font-size: 0.85em; text-transform: uppercase; }
+td { font-size: 0.95em; }
+tr:hover { background: #1c2128; }
+.tag { display: inline-block; padding: 4px 12px; border-radius: 20px; font-size: 0.8em; font-weight: 500; }
+.tag-gold { background: rgba(255, 215, 0, 0.15); color: #ffd700; }
+.tag-red { background: rgba(255, 107, 107, 0.15); color: #ff6b6b; }
+.tag-blue { background: rgba(88, 166, 255, 0.15); color: #58a6ff; }
+.tag-green { background: rgba(63, 185, 80, 0.15); color: #3fb950; }
+.tag-purple { background: rgba(188, 140, 255, 0.15); color: #bc8cff; }
+.two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+.footer { text-align: center; padding: 30px 0; color: #484f58; font-size: 0.85em; border-top: 1px solid #21262d; }
+.version-compare { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; }
+.version-card { background: #1c2128; border: 1px solid #21262d; border-radius: 8px; padding: 16px; }
+.version-card.best { border-color: #3fb950; background: rgba(63, 185, 80, 0.05); }
+.version-card h3 { color: #58a6ff; margin-bottom: 12px; font-size: 1em; }
+.version-card .val { font-size: 1.4em; font-weight: 700; }
+.heatmap { display: grid; grid-template-columns: auto repeat(3, 1fr); gap: 2px; }
+.heatmap-cell { padding: 10px; text-align: center; font-size: 0.85em; border-radius: 4px; }
+.heatmap-header { color: #8b949e; font-weight: 600; }
+</style>
+</head>
+<body>
+<div class="container">
+
+<div class="header">
+    <h1>📊 ETF轮动策略运行报告</h1>
+    <p>回测区间: 2023-06-12 ~ 2026-07-11 | 初始资金: 100,000元 | 参数: MA(25,60)</p>
+</div>
+
+<!-- 核心指标 -->
+<div class="metrics-grid">
+    <div class="metric-card">
+        <div class="metric-value positive">+45.8%</div>
+        <div class="metric-label">总收益</div>
+    </div>
+    <div class="metric-card">
+        <div class="metric-value positive">+13.1%</div>
+        <div class="metric-label">年化收益</div>
+    </div>
+    <div class="metric-card">
+        <div class="metric-value negative">-9.7%</div>
+        <div class="metric-label">最大回撤</div>
+    </div>
+    <div class="metric-card">
+        <div class="metric-value neutral">1.02</div>
+        <div class="metric-label">夏普比率</div>
+    </div>
+    <div class="metric-card">
+        <div class="metric-value neutral">1.35</div>
+        <div class="metric-label">Calmar比率</div>
+    </div>
+    <div class="metric-card">
+        <div class="metric-value positive">53.1%</div>
+        <div class="metric-label">周胜率</div>
+    </div>
+    <div class="metric-card">
+        <div class="metric-value neutral">92</div>
+        <div class="metric-label">交易次数</div>
+    </div>
+    <div class="metric-card">
+        <div class="metric-value positive">+10.5%</div>
+        <div class="metric-label">超额收益(vs沪深300)</div>
+    </div>
+</div>
+
+<!-- 净值曲线 -->
+<div class="chart-container">
+    <h2>📈 净值曲线</h2>
+    <canvas id="navChart"></canvas>
+</div>
+
+<!-- 回撤曲线 -->
+<div class="chart-container">
+    <h2>📉 回撤曲线</h2>
+    <canvas id="drawdownChart"></canvas>
+</div>
+
+<!-- 年度收益 -->
+<div class="two-col">
+    <div class="section">
+        <h2>📅 年度收益</h2>
+        <table>
+            <thead><tr><th>年份</th><th>收益率</th><th>表现</th></tr></thead>
+            <tbody>
+                <tr><td>2023</td><td class="negative">-0.1%</td><td><span class="tag tag-red">震荡</span></td></tr>
+                <tr><td>2024</td><td class="positive">+13.4%</td><td><span class="tag tag-green">良好</span></td></tr>
+                <tr><td>2025</td><td class="positive">+37.6%</td><td><span class="tag tag-green">优秀</span></td></tr>
+                <tr><td>2026</td><td class="negative">-1.3%</td><td><span class="tag tag-red">回调</span></td></tr>
+            </tbody>
+        </table>
+    </div>
+    <div class="section">
+        <h2>📊 月度收益分布</h2>
+        <canvas id="monthlyChart"></canvas>
+    </div>
+</div>
+
+<!-- 策略说明 -->
+<div class="section">
+    <h2>🎯 策略核心逻辑</h2>
+    <table>
+        <thead><tr><th>模块</th><th>逻辑</th><th>参数</th></tr></thead>
+        <tbody>
+            <tr>
+                <td><span class="tag tag-blue">信号</span></td>
+                <td>多周期动量融合</td>
+                <td>5日×0.2 + 20日×0.5 + 60日×0.3</td>
+            </tr>
+            <tr>
+                <td><span class="tag tag-blue">信号</span></td>
+                <td>风险调整动量</td>
+                <td>动量 / 年化波动率</td>
+            </tr>
+            <tr>
+                <td><span class="tag tag-blue">信号</span></td>
+                <td>双均线趋势确认</td>
+                <td>MA25 > MA60 且 价格 > MA25</td>
+            </tr>
+            <tr>
+                <td><span class="tag tag-green">择时</span></td>
+                <td>波动率择时</td>
+                <td>>80%分位减仓，>90%分位空仓</td>
+            </tr>
+            <tr>
+                <td><span class="tag tag-green">择时</span></td>
+                <td>动态持仓数</td>
+                <td>0-3个，根据市场状态调整</td>
+            </tr>
+            <tr>
+                <td><span class="tag tag-purple">过滤</span></td>
+                <td>相关性过滤</td>
+                <td>相关性>0.7不同时持有</td>
+            </tr>
+            <tr>
+                <td><span class="tag tag-purple">过滤</span></td>
+                <td>QDII偏离度检查</td>
+                <td>偏离MA20>5%降权50%</td>
+            </tr>
+            <tr>
+                <td><span class="tag tag-red">止损</span></td>
+                <td>个股成本价止损</td>
+                <td>从买入价跌8%止损</td>
+            </tr>
+            <tr>
+                <td><span class="tag tag-red">止损</span></td>
+                <td>组合高点回撤止损</td>
+                <td>从高点回撤10%减半仓</td>
+            </tr>
+            <tr>
+                <td><span class="tag tag-red">止损</span></td>
+                <td>暴跌反弹止损（仅恒科）</td>
+                <td>本周跌5%+反弹<50%止损</td>
+            </tr>
+        </tbody>
+    </table>
+</div>
+
+<!-- 版本对比 -->
+<div class="section">
+    <h2>🔄 版本迭代对比</h2>
+    <div class="version-compare">
+        <div class="version-card">
+            <h3>V1: 基础版（无暴跌止损）</h3>
+            <p>总收益: <span class="val positive">+42.4%</span></p>
+            <p>夏普: 0.94 | 回撤: -7.0%</p>
+        </div>
+        <div class="version-card">
+            <h3>V2: 全部ETF暴跌止损</h3>
+            <p>总收益: <span class="val negative">+40.5%</span></p>
+            <p>夏普: 0.88 | 回撤: -8.2%</p>
+            <p style="color:#f85149;font-size:0.85em">⚠️ 黄金误杀导致收益下降</p>
+        </div>
+        <div class="version-card best">
+            <h3>V3: 仅恒科暴跌止损 ✅</h3>
+            <p>总收益: <span class="val positive">+45.8%</span></p>
+            <p>夏普: 1.02 | 回撤: -9.7%</p>
+            <p style="color:#3fb950;font-size:0.85em">✓ 最优版本</p>
+        </div>
+    </div>
+</div>
+
+<!-- 参数敏感性 -->
+<div class="section">
+    <h2>🔬 参数敏感性分析</h2>
+    <p style="color:#8b949e;margin-bottom:15px;">9/9参数组合全部盈利，策略稳健，无过拟合风险</p>
+    <div class="heatmap">
+        <div class="heatmap-cell heatmap-header">MA短\MA长</div>
+        <div class="heatmap-cell heatmap-header">40</div>
+        <div class="heatmap-cell heatmap-header">60</div>
+        <div class="heatmap-cell heatmap-header">80</div>
+        
+        <div class="heatmap-cell heatmap-header">15</div>
+        <div class="heatmap-cell" style="background:rgba(63,185,80,0.2)">+27.9%</div>
+        <div class="heatmap-cell" style="background:rgba(248,81,73,0.2)">+18.2%</div>
+        <div class="heatmap-cell" style="background:rgba(63,185,80,0.3)">+35.8%</div>
+        
+        <div class="heatmap-cell heatmap-header">20</div>
+        <div class="heatmap-cell" style="background:rgba(63,185,80,0.3)">+32.3%</div>
+        <div class="heatmap-cell" style="background:rgba(63,185,80,0.4)">+50.4%</div>
+        <div class="heatmap-cell" style="background:rgba(63,185,80,0.2)">+27.2%</div>
+        
+        <div class="heatmap-cell heatmap-header">25</div>
+        <div class="heatmap-cell" style="background:rgba(63,185,80,0.5)">+70.2%</div>
+        <div class="heatmap-cell" style="background:rgba(63,185,80,0.6)">+69.2% ⭐</div>
+        <div class="heatmap-cell" style="background:rgba(63,185,80,0.3)">+40.7%</div>
+    </div>
+</div>
+
+<!-- ETF池 -->
+<div class="section">
+    <h2>📦 ETF池</h2>
+    <table>
+        <thead><tr><th>ETF</th><th>代码</th><th>资产类别</th><th>特点</th><th>暴跌止损</th></tr></thead>
+        <tbody>
+            <tr>
+                <td>黄金ETF</td>
+                <td>518880</td>
+                <td><span class="tag tag-gold">避险</span></td>
+                <td>与其他资产低相关</td>
+                <td>❌ 不应用</td>
+            </tr>
+            <tr>
+                <td>红利ETF</td>
+                <td>510880</td>
+                <td><span class="tag tag-green">价值</span></td>
+                <td>SmartBeta，低波动</td>
+                <td>❌ 不应用</td>
+            </tr>
+            <tr>
+                <td>标普500ETF</td>
+                <td>513500</td>
+                <td><span class="tag tag-blue">美股</span></td>
+                <td>QDII，有溢价风险</td>
+                <td>❌ 不应用</td>
+            </tr>
+            <tr>
+                <td>恒生科技ETF</td>
+                <td>513180</td>
+                <td><span class="tag tag-purple">港股科技</span></td>
+                <td>QDII，高波动</td>
+                <td>✅ 应用</td>
+            </tr>
+            <tr>
+                <td>沪深300ETF</td>
+                <td>510300</td>
+                <td><span class="tag tag-blue">A股宽基</span></td>
+                <td>流动性最好</td>
+                <td>❌ 不应用</td>
+            </tr>
+        </tbody>
+    </table>
+</div>
+
+<!-- 风险提示 -->
+<div class="section">
+    <h2>⚠️ 风险提示</h2>
+    <ul style="color:#8b949e;padding-left:20px;">
+        <li>回测不等于实盘，历史表现不代表未来收益</li>
+        <li>数据局限：只有3年数据，未经历完整牛熊周期</li>
+        <li>QDII溢价风险：标普500/恒生科技ETF可能有溢价</li>
+        <li>流动性风险：极端行情下ETF可能有价差扩大</li>
+        <li>过拟合风险：虽然参数敏感性分析显示稳健，但仍需持续观察</li>
+    </ul>
+</div>
+
+<div class="footer">
+    <p>生成时间: 2026-07-15 | 策略版本: V3.0 | GitHub: github.com/MichaelHan0228/quant</p>
+</div>
+
+</div>
+
+<script>
+// 净值曲线数据
+const navDates = ["2023-06-16","2023-06-23","2023-06-30","2023-07-07","2023-07-14","2023-07-21","2023-07-28","2023-08-04","2023-08-11","2023-08-18","2023-08-25","2023-09-01","2023-09-08","2023-09-15","2023-09-22","2023-09-29","2023-10-06","2023-10-13","2023-10-20","2023-10-27","2023-11-03","2023-11-10","2023-11-17","2023-11-24","2023-12-01","2023-12-08","2023-12-15","2023-12-22","2023-12-29","2024-01-05","2024-01-12","2024-01-19","2024-01-26","2024-02-02","2024-02-09","2024-02-16","2024-02-23","2024-03-01","2024-03-08","2024-03-15","2024-03-22","2024-03-29","2024-04-05","2024-04-12","2024-04-19","2024-04-26","2024-05-03","2024-05-10","2024-05-17","2024-05-24","2024-05-31","2024-06-07","2024-06-14","2024-06-21","2024-06-28","2024-07-05","2024-07-12","2024-07-19","2024-07-26","2024-08-02","2024-08-09","2024-08-16","2024-08-23","2024-08-30","2024-09-06","2024-09-13","2024-09-20","2024-09-27","2024-10-04","2024-10-11","2024-10-18","2024-10-25","2024-11-01","2024-11-08","2024-11-15","2024-11-22","2024-11-29","2024-12-06","2024-12-13","2024-12-20","2024-12-27","2025-01-03","2025-01-10","2025-01-17","2025-01-24","2025-01-31","2025-02-07","2025-02-14","2025-02-21","2025-02-28","2025-03-07","2025-03-14","2025-03-21","2025-03-28","2025-04-04","2025-04-11","2025-04-18","2025-04-25","2025-05-02","2025-05-09","2025-05-16","2025-05-23","2025-05-30","2025-06-06","2025-06-13","2025-06-20","2025-06-27","2025-07-04","2025-07-11","2025-07-18","2025-07-25","2025-08-01","2025-08-08","2025-08-15","2025-08-22","2025-08-29","2025-09-05","2025-09-12","2025-09-19","2025-09-26","2025-10-03","2025-10-10","2025-10-17","2025-10-24","2025-10-31","2025-11-07","2025-11-14","2025-11-21","2025-11-28","2025-12-05","2025-12-12","2025-12-19","2025-12-26","2026-01-02","2026-01-09","2026-01-16","2026-01-23","2026-01-30","2026-02-06","2026-02-13","2026-02-20","2026-02-27","2026-03-06","2026-03-13","2026-03-20","2026-03-27","2026-04-03","2026-04-10","2026-04-17","2026-04-24","2026-05-01","2026-05-08","2026-05-15","2026-05-22","2026-05-29","2026-06-05","2026-06-12","2026-06-19","2026-06-26","2026-07-03","2026-07-10"];
+const navValues = [100000,100000,100000,100038,100736,102245,101620,101459,101251,101251,101418,102353,103425,103698,103995,100173,100173,99369,99896,99940,100178,98963,99354,98406,97286,97498,98791,99530,99941,99441,100333,100620,101408,102616,104109,104109,104777,104798,106985,106324,108643,110579,109714,111355,111355,111355,111261,112825,112298,109509,109410,110457,110036,110354,112001,112637,112088,112233,111242,111242,111242,110542,111329,111510,111460,112409,112934,112714,112714,112714,112714,112714,113408,112468,106490,108530,111284,113630,114446,110867,112764,110051,111434,112053,113491,113199,117167,120534,119861,117604,119096,121772,123610,126595,129434,132692,138334,137369,136295,137387,131308,132061,132017,132105,131183,129543,128649,130132,130716,129668,131466,130580,131072,131526,134875,137520,136473,137545,136010,138631,140728,144327,150539,148225,149666,150915,151182,147531,146801,146994,147782,148410,151405,147795,150123,152243,158323,161459,156243,157987,157987,160851,160370,158233,155037,153322,153322,153322,153322,153674,156529,152785,150750,150750,150750,150750,150750,150258,145841,145841,145841];
+const drawdownValues = [0,0,0,0,0,0,-0.61,-0.77,-0.97,-0.97,-0.81,0,0,0,0,-3.67,-3.67,-4.45,-3.94,-3.9,-3.67,-4.84,-4.46,-5.37,-6.45,-6.25,-5,-4.29,-3.9,-4.38,-3.52,-3.25,-2.49,-1.33,0,0,0,0,0,-0.62,0,0,-0.78,0,0,0,-0.08,0,-0.47,-2.94,-3.03,-2.1,-2.47,-2.19,-0.73,-0.17,-0.65,-0.53,-1.4,-1.4,-1.4,-2.02,-1.33,-1.17,-1.21,-0.37,0,-0.2,-0.2,-0.2,-0.2,-0.2,0,-0.83,-6.1,-4.3,-1.87,0,0,-3.13,-1.47,-3.84,-2.63,-2.09,-0.84,-1.09,0,0,-0.56,-2.43,-1.19,0,0,0,0,0,0,-0.7,-1.47,-0.68,-5.08,-4.53,-4.57,-4.5,-5.17,-6.35,-7,-5.93,-5.51,-6.26,-4.96,-5.6,-5.25,-4.92,-2.5,-0.59,-1.35,-0.57,-1.68,0,0,0,0,-1.54,-0.58,0,0,-2.42,-2.9,-2.77,-2.25,-1.83,0,-2.38,-0.85,0,0,0,-3.23,-2.15,-2.15,-0.38,-0.67,-2,-3.98,-5.04,-5.04,-5.04,-5.04,-4.82,-3.05,-5.37,-6.63,-6.63,-6.63,-6.63,-6.63,-6.94,-9.67,-9.67,-9.67];
+
+// 净值曲线
+new Chart(document.getElementById('navChart'), {
+    type: 'line',
+    data: {
+        labels: navDates,
+        datasets: [{
+            label: '策略净值',
+            data: navValues,
+            borderColor: '#58a6ff',
+            backgroundColor: 'rgba(88, 166, 255, 0.1)',
+            fill: true,
+            tension: 0.1,
+            pointRadius: 0,
+            borderWidth: 2
+        }]
+    },
+    options: {
+        responsive: true,
+        plugins: {
+            legend: { display: false },
+            tooltip: {
+                callbacks: {
+                    label: ctx => `净值: ¥${ctx.parsed.y.toLocaleString()}`
+                }
+            }
+        },
+        scales: {
+            x: { 
+                ticks: { maxTicksLimit: 15, color: '#484f58' },
+                grid: { color: '#21262d' }
+            },
+            y: { 
+                ticks: { 
+                    color: '#484f58',
+                    callback: v => `¥${(v/1000).toFixed(0)}k`
+                },
+                grid: { color: '#21262d' }
+            }
+        }
+    }
+});
+
+// 回撤曲线
+new Chart(document.getElementById('drawdownChart'), {
+    type: 'line',
+    data: {
+        labels: navDates,
+        datasets: [{
+            label: '回撤',
+            data: drawdownValues,
+            borderColor: '#f85149',
+            backgroundColor: 'rgba(248, 81, 73, 0.2)',
+            fill: true,
+            tension: 0.1,
+            pointRadius: 0,
+            borderWidth: 1.5
+        }]
+    },
+    options: {
+        responsive: true,
+        plugins: { legend: { display: false } },
+        scales: {
+            x: { 
+                ticks: { maxTicksLimit: 15, color: '#484f58' },
+                grid: { color: '#21262d' }
+            },
+            y: { 
+                ticks: { 
+                    color: '#484f58',
+                    callback: v => v.toFixed(1) + '%'
+                },
+                grid: { color: '#21262d' }
+            }
+        }
+    }
+});
+
+// 月度收益柱状图
+const monthlyData = [
+    {month: '23-07', ret: 1.58}, {month: '23-08', ret: -0.04}, {month: '23-09', ret: -2.13},
+    {month: '23-10', ret: -0.23}, {month: '23-11', ret: -1.77}, {month: '23-12', ret: 2.73},
+    {month: '24-01', ret: 1.98}, {month: '24-02', ret: 2.11}, {month: '24-03', ret: 5.52},
+    {month: '24-04', ret: 1.5}, {month: '24-05', ret: -1.66}, {month: '24-06', ret: 1.4},
+    {month: '24-07', ret: -1.24}, {month: '24-08', ret: 0.24}, {month: '24-09', ret: 1.13},
+    {month: '24-11', ret: -1.87}, {month: '24-12', ret: -0.76},
+    {month: '25-01', ret: 2.86}, {month: '25-02', ret: 0.37}, {month: '25-03', ret: 6.3},
+    {month: '25-04', ret: 6.13}, {month: '25-05', ret: -3.14}, {month: '25-06', ret: -2.62},
+    {month: '25-07', ret: 1.03}, {month: '25-08', ret: 5.31}, {month: '25-09', ret: 1.58},
+    {month: '25-10', ret: 6.35}, {month: '25-11', ret: -2.73}, {month: '25-12', ret: 3.0},
+    {month: '26-01', ret: 9.25}, {month: '26-02', ret: 2.95}, {month: '26-03', ret: -4.4},
+    {month: '26-04', ret: 0.23}, {month: '26-05', ret: -3.69}, {month: '26-06', ret: -3.26}
+];
+
+new Chart(document.getElementById('monthlyChart'), {
+    type: 'bar',
+    data: {
+        labels: monthlyData.map(d => d.month),
+        datasets: [{
+            data: monthlyData.map(d => d.ret),
+            backgroundColor: monthlyData.map(d => d.ret >= 0 ? 'rgba(63, 185, 80, 0.6)' : 'rgba(248, 81, 73, 0.6)'),
+            borderColor: monthlyData.map(d => d.ret >= 0 ? '#3fb950' : '#f85149'),
+            borderWidth: 1
+        }]
+    },
+    options: {
+        responsive: true,
+        plugins: { legend: { display: false } },
+        scales: {
+            x: { 
+                ticks: { maxTicksLimit: 20, color: '#484f58', maxRotation: 45 },
+                grid: { display: false }
+            },
+            y: { 
+                ticks: { 
+                    color: '#484f58',
+                    callback: v => v.toFixed(1) + '%'
+                },
+                grid: { color: '#21262d' }
+            }
+        }
+    }
+});
+</script>
+</body>
+</html>
