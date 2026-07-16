@@ -26,7 +26,7 @@ from .risk_control import (
 from .utils import (
     get_price_on_date, get_next_trading_day,
     calc_buy_price, calc_sell_price, calc_commission,
-    filter_by_correlation
+    filter_by_correlation, calc_etf_volatility
 )
 
 
@@ -78,9 +78,16 @@ def execute_stop_loss(all_data: dict, holdings: dict, capital: float,
     for code in stop_codes:
         if code not in holdings:
             continue
-        price = get_price_on_date(all_data, code, exec_date, "open")
-        if price and holdings[code]["shares"] > 0:
-            sell_price = calc_sell_price(price, code)
+        open_price = get_price_on_date(all_data, code, exec_date, "open")
+        if open_price and holdings[code]["shares"] > 0:
+            if cfg.USE_STOP_PRICE_OPTIMIZATION:
+                # 取 min(开盘价, 止损价)，更贴近跳空低开的实际场景
+                stop_threshold = cfg.STOP_LOSS_BY_ETF.get(code, cfg.STOP_LOSS_DEFAULT)
+                stop_price = holdings[code]["cost"] * (1 + stop_threshold)
+                exec_price = min(open_price, stop_price)
+            else:
+                exec_price = open_price
+            sell_price = calc_sell_price(exec_price, code)
             sell_amount = holdings[code]["shares"] * sell_price
             commission = calc_commission(sell_amount)
             capital += sell_amount - commission
@@ -216,7 +223,7 @@ def execute_trades(all_data: dict, holdings: dict, capital: float,
                 commission = calc_commission(buy_amount)
                 if capital >= buy_amount + commission:
                     capital -= buy_amount + commission
-                    holdings[code] = {"shares": buy_shares, "cost": buy_price}
+                    holdings[code] = {"shares": buy_shares, "cost": buy_price, "buy_date": exec_date}
                     if not silent:
                         trade_log.append({
                             "date": exec_date.strftime("%Y-%m-%d"),
@@ -290,13 +297,27 @@ def run_backtest(all_data: dict, start_date: str, end_date: str,
             trade_log.extend(stop_trades)
             if not silent and stop_trades:
                 for t in stop_trades:
-                    print(f"  [{date_str}] 🔴 止损/止盈执行 {t['code']}: 卖出{t['shares']}股@{t['exec_price']}")
+                    print(f"  [{date_str}] [STOP] 止损/止盈执行 {t['code']}: 卖出{t['shares']}股@{t['exec_price']}")
             # 清理已止损ETF的最高价记录
             for code in codes_to_sell:
                 if code in etf_high_watermarks:
                     del etf_high_watermarks[code]
             pending_stops = {}
-        
+
+        # === 每日：持仓超时退出（持有超时天数且收益低于阈值，换入更强ETF） ===
+        if cfg.USE_TIMEOUT_EXIT:
+            for code, holding in list(holdings.items()):
+                if "buy_date" in holding:
+                    days_held = (current_date - holding["buy_date"]).days
+                    if days_held > cfg.TIMEOUT_DAYS:
+                        price = get_price_on_date(all_data, code, current_date, "close")
+                        if price:
+                            pnl = (price / holding["cost"] - 1)
+                            if pnl < cfg.TIMEOUT_PNL_THRESHOLD and code not in pending_stops:
+                                pending_stops[code] = current_date
+                                if not silent:
+                                    print(f"  [{date_str}] [TIMEOUT] {code}: held {days_held}d, pnl {pnl*100:.1f}%")
+
         # === 每日：更新每只ETF的最高价 ===
         for code in holdings:
             price = get_price_on_date(all_data, code, current_date, "high")
@@ -317,7 +338,7 @@ def run_backtest(all_data: dict, start_date: str, end_date: str,
                 if pnl_pct < stop_loss_threshold:
                     daily_stop_codes.append(code)
                     if not silent:
-                        print(f"  [{date_str}] ⚠️ 触发止损 {code}: 浮亏{pnl_pct*100:.1f}%")
+                        print(f"  [{date_str}] [WARN] stop-loss {code}: 浮亏{pnl_pct*100:.1f}%")
                     continue
                 
                 # 第四层：移动止盈（从最高点回撤，按ETF分档）
@@ -328,7 +349,7 @@ def run_backtest(all_data: dict, start_date: str, end_date: str,
                         daily_stop_codes.append(code)
                         if not silent:
                             high = etf_high_watermarks[code]
-                            print(f"  [{date_str}] 🎯 触发止盈 {code}: 从最高{high:.3f}回撤{drawdown_from_high*100:.1f}%")
+                            print(f"  [{date_str}] [TRAIL] trailing-stop {code}: 从最高{high:.3f}回撤{drawdown_from_high*100:.1f}%")
         
         if daily_stop_codes:
             # 记录到待止损队列，下一个交易日执行
@@ -353,7 +374,7 @@ def run_backtest(all_data: dict, start_date: str, end_date: str,
                         pending_stops[code] = current_date
                         crash_events.append({"date": date_str, "code": code, **crash_info})
                         if not silent:
-                            print(f"  [{date_str}] ⚠️ 暴跌止损 {code}: "
+                            print(f"  [{date_str}] [CRASH] crash-stop {code}: "
                                   f"本周跌{crash_info['crash_return']:.1f}%, "
                                   f"反弹{crash_info['recovery']:.0f}%")
             
@@ -375,12 +396,23 @@ def run_backtest(all_data: dict, start_date: str, end_date: str,
             top_n = calc_dynamic_positions(qualified_filtered, vol_pct)
             selected_codes = qualified_filtered.head(top_n)["code"].tolist()
             
-            # 构建目标权重（等权重分配）
+            # 构建目标权重
             target_weights = {}
             if selected_codes:
-                weight_per = 1.0 / len(selected_codes)
-                for code in selected_codes:
-                    target_weights[code] = weight_per
+                if cfg.USE_INVERSE_VOL_WEIGHT:
+                    # 波动率倒数加权：低波ETF拿更多仓位
+                    inv_vols = {}
+                    for code in selected_codes:
+                        vol = calc_etf_volatility(all_data, code, current_date, lookback=20)
+                        inv_vols[code] = 1.0 / vol
+                    inv_vol_sum = sum(inv_vols.values())
+                    for code in selected_codes:
+                        target_weights[code] = inv_vols[code] / inv_vol_sum
+                else:
+                    # 等权重分配
+                    weight_per = 1.0 / len(selected_codes)
+                    for code in selected_codes:
+                        target_weights[code] = weight_per
             
             # 从目标中移除待止损的
             for code in pending_stops:

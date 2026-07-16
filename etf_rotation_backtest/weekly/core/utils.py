@@ -157,6 +157,35 @@ def calc_rolling_correlation(all_data: dict, code1: str, code2: str,
     return round(np.corrcoef(corr, corr2)[0, 1], 3)
 
 
+def calc_etf_volatility(all_data: dict, code: str, date, lookback: int = 20) -> float:
+    """
+    计算单只ETF的年化波动率。
+
+    用途：波动率倒数加权（低波ETF拿更多仓位）。
+
+    参数:
+        all_data: 所有ETF数据字典
+        code: ETF代码
+        date: 计算日期
+        lookback: 波动率计算窗口（默认20日）
+
+    返回:
+        float，年化波动率（%），如 20.0 表示 20%。数据不足返回 20.0 作为 fallback。
+    """
+    if code not in all_data:
+        return 20.0
+    df = all_data[code]
+    mask = df["date"] <= pd.Timestamp(date)
+    recent = df[mask].tail(lookback + 5)
+    if len(recent) < lookback:
+        return 20.0
+    returns = recent["close"].tail(lookback).pct_change().dropna()
+    if len(returns) < 10:
+        return 20.0
+    vol = returns.std() * np.sqrt(252) * 100
+    return round(vol, 2) if vol > 0.1 else 20.0
+
+
 def filter_by_correlation(selected_codes: list, all_data: dict, date,
                           threshold: float = CORR_THRESHOLD) -> list:
     """

@@ -149,7 +149,7 @@ def main():
         print_sensitivity_results(sens_df)
         sens_df.to_csv(os.path.join(output_dir, "sensitivity.csv"), index=False, encoding="utf-8-sig")
     
-    print("\n✅ 完成！")
+    print("\nDone!")
 
 
 if __name__ == "__main__":
