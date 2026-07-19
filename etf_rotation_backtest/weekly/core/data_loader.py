@@ -102,17 +102,17 @@ def _fetch_from_sina(code: str, days: int = 2000) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def _fetch_from_tencent(code: str, days: int = 800) -> pd.DataFrame:
+def _fetch_from_tencent(code: str, days: int = 3000) -> pd.DataFrame:
     """
-    从腾讯财经API获取ETF日K线数据（备用）。
+    从腾讯财经API获取ETF日K线数据（前复权）。
+    qfq = 前复权，历史价格已根据分红送股调整。
     """
     prefix = "sh" if code.startswith(("5", "6", "9")) else "sz"
     url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={prefix}{code},day,,,{days},qfq"
     
-    req = requests.Request(url)
-    req.add_header("User-Agent", "Mozilla/5.0")
+    headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        resp = requests.get(url, timeout=15)
+        resp = requests.get(url, headers=headers, timeout=15)
         data = resp.json()
     except Exception as e:
         print(f"  [WARN] 腾讯API获取 {code} 失败: {e}")

@@ -223,3 +223,64 @@ def filter_by_correlation(selected_codes: list, all_data: dict, date,
             filtered.append(code)
     
     return filtered
+
+
+def calc_atr(all_data: dict, code: str, date, period: int = 14) -> float:
+    """
+    从预计算的ATR列中查找指定日期的ATR值。
+
+    前置条件：已调用 precompute_atr() 将ATR存入 all_data[code]["atr"] 列。
+
+    参数:
+        all_data: 所有ETF数据字典
+        code: ETF代码
+        date: 目标日期
+        period: 未使用（保持接口兼容）
+
+    返回:
+        float，ATR值。无数据返回0。
+    """
+    if code not in all_data:
+        return 0
+    df = all_data[code]
+    if "atr" not in df.columns:
+        return 0
+    mask = df["date"] <= pd.Timestamp(date)
+    if mask.sum() == 0:
+        return 0
+    return df[mask].iloc[-1]["atr"]
+
+
+def precompute_atr(all_data: dict, period: int = 14):
+    """
+    批量预计算所有ETF的ATR，存入 each DataFrame 的 "atr" 列。
+
+    在回测开始前调用一次，之后 calc_atr() 变为 O(1) 查找。
+
+    参数:
+        all_data: 所有ETF数据字典（会被修改）
+        period: ATR周期（默认14日）
+    """
+    import numpy as np
+    for code, df in all_data.items():
+        if len(df) < period + 2:
+            df["atr"] = 0.0
+            continue
+        high = df["high"].values
+        low = df["low"].values
+        close = df["close"].values
+        # 计算True Range
+        tr_arr = np.zeros(len(df))
+        for i in range(1, len(df)):
+            tr_arr[i] = max(
+                high[i] - low[i],
+                abs(high[i] - close[i - 1]),
+                abs(low[i] - close[i - 1])
+            )
+        # Wilder平滑（前period个TR取平均作为初始ATR，之后指数平滑）
+        atr_arr = np.zeros(len(df))
+        init_end = min(period + 1, len(df))
+        atr_arr[init_end - 1] = tr_arr[1:init_end].mean()
+        for i in range(init_end, len(df)):
+            atr_arr[i] = atr_arr[i - 1] * (period - 1) / period + tr_arr[i] / period
+        df["atr"] = np.round(atr_arr, 4)

@@ -110,9 +110,8 @@ def main():
         return
     
     # 确定回测起始日期
-    min_dates = [df["date"].iloc[0] for df in all_data.values()]
-    actual_start = max(min_dates) + timedelta(days=args.ma_long + 10)
-    start_str = max(actual_start, pd.Timestamp(args.start)).strftime("%Y-%m-%d")
+    # 从用户指定的起始日期开始，数据不足的ETF会自动跳过
+    start_str = pd.Timestamp(args.start).strftime("%Y-%m-%d")
     
     print(f"\n参数: MA({args.ma_short},{args.ma_long})")
     print(f"区间: {start_str} ~ {args.end}")

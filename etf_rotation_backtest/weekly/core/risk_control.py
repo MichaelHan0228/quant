@@ -95,9 +95,7 @@ def calc_dynamic_positions(qualified_df: pd.DataFrame,
     """
     动态计算持仓数量。
     
-    根据两个维度决定持仓数：
-      1. 市场波动率百分位（择时）
-      2. 趋势向上的ETF数量（市场强度）
+    根据市场波动率和通过过滤的ETF数量决定持仓数。
     
     参数:
         qualified_df: 符合条件的ETF信号DataFrame（已按动量排序）
@@ -108,13 +106,10 @@ def calc_dynamic_positions(qualified_df: pd.DataFrame,
     """
     n_trending = len(qualified_df)
     
-    # 波动率择时
-    if vol_percentile > cfg.VOL_EXTREME_THRESHOLD:
-        return 0  # 极端高波动，空仓
+    # 波动率极端时最多持1个
     if vol_percentile > cfg.VOL_HIGH_THRESHOLD:
-        return min(1, n_trending)  # 高波动，最多持1个
+        return min(1, n_trending)
     
-    # 根据趋势数量决定
     if n_trending == 0:
         return 0
     elif n_trending == 1:

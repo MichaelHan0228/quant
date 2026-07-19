@@ -16,7 +16,7 @@ import numpy as np
 from .config import INITIAL_CAPITAL, SENSITIVITY_MA_SHORT_RANGE, SENSITIVITY_MA_LONG_RANGE
 
 
-def calc_metrics(nav_df: pd.DataFrame, freq: str = "weekly") -> dict:
+def calc_metrics(nav_df: pd.DataFrame, freq: str = "daily") -> dict:
     """
     计算回测核心指标。
     
