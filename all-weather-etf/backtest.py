@@ -134,6 +134,17 @@ def run_backtest(panel: pd.DataFrame, weights: dict, label: str):
                     holdings[leg] -= sh
                     cash += proceeds
                     fees += fee
+        # 现金腿超配（511880市值高于目标）同样在卖出阶段减仓，回笼资金供后买
+        if CASH_LEG in weights and holdings[CASH_LEG] > 0:
+            tgt_cash = total * weights[CASH_LEG]
+            etf_val = holdings[CASH_LEG] * prices[CASH_LEG]
+            if etf_val > tgt_cash:
+                sh = min(holdings[CASH_LEG],
+                         int((etf_val - tgt_cash) / prices[CASH_LEG] / 100) * 100)
+                if sh > 0:
+                    proceeds, _ = sell_shares(CASH_LEG, prices[CASH_LEG], sh)
+                    holdings[CASH_LEG] -= sh
+                    cash += proceeds
         # 后买：按目标补齐（现金腿最后兜底）
         for leg, w in weights.items():
             if leg == CASH_LEG:
@@ -146,22 +157,15 @@ def run_backtest(panel: pd.DataFrame, weights: dict, label: str):
                     holdings[leg] += sh
                     cash -= spent
                     fees += spent - sh * (prices[leg] + LEGS[leg]["spread"])
-        # 现金腿：把超出目标部分的现金买入511880，或补足低配
+        # 现金腿：用闲置现金把511880补到目标市值（低配补买；超配已在卖出阶段减仓）
         if CASH_LEG in weights:
             tgt_cash = total * weights[CASH_LEG]
-            cur_cash_val = cash + holdings[CASH_LEG] * prices[CASH_LEG]
-            if cur_cash_val > tgt_cash and cash > 0:
-                sh, spent = buy_shares(CASH_LEG, prices[CASH_LEG], cur_cash_val - tgt_cash, cash)
+            etf_val = holdings[CASH_LEG] * prices[CASH_LEG]
+            if etf_val < tgt_cash and cash > 0:
+                sh, spent = buy_shares(CASH_LEG, prices[CASH_LEG], tgt_cash - etf_val, cash)
                 if sh:
                     holdings[CASH_LEG] += sh
                     cash -= spent
-            elif cur_cash_val < tgt_cash and holdings[CASH_LEG] > 0:
-                need = tgt_cash - cur_cash_val
-                sh = min(holdings[CASH_LEG], int(need / prices[CASH_LEG] / 100) * 100)
-                if sh > 0:
-                    proceeds, _ = sell_shares(CASH_LEG, prices[CASH_LEG], sh)
-                    holdings[CASH_LEG] -= sh
-                    cash += proceeds
         total_fees += fees
         rebal_log.append({"date": date, "reason": reason, "fees": round(fees, 2)})
 
