@@ -72,6 +72,10 @@ VARIANTS_A500 = {
 V3_WEIGHTS = {"hlb": 0.25, "sp500": 0.20, "bond10": 0.25,
               "gold": 0.20, "soybean": 0.05, "cash": 0.05}
 
+# 国债腿下限：A500 凑钱先货币后国债，但国债不卖穿此线（保对冲引擎）。
+# 0 = 关闭（v3 原版行为）；0.10 = 下限10%（2026-07-30 增强版实验）
+BOND_FLOOR = 0.0
+
 
 def build_dy_signal() -> pd.DataFrame:
     """真实股息率全史扩展分位 → 择时层档位（同 backtest_real_dy 口径）"""
@@ -181,7 +185,7 @@ def run_backtest_combo(panel: pd.DataFrame, base_weights: dict,
         bond_base = base_weights["bond10"] - (hlb_t - base_weights["hlb"])
         cash_base = base_weights[CASH_LEG] + (base_weights["sp500"] - sp500_t)
         from_cash = min(cash_base, wide_t)                    # 先卖货币
-        from_bond = min(bond_base, wide_t - from_cash)        # 再卖国债
+        from_bond = min(max(bond_base - BOND_FLOOR, 0.0), wide_t - from_cash)   # 再卖国债(限下限)
         shortfall = wide_t - from_cash - from_bond            # 货币+国债都不够的部分
         weights["hlb"] = round(hlb_t - shortfall, 4)          # 差额从红利低波让出（不会发生，兜底）
         weights["bond10"] = round(bond_base - from_bond, 4)
