@@ -1,0 +1,399 @@
+# -*- coding: utf-8 -*-
+"""双低可转债轮动 —— 周频回测引擎 + 绩效指标
+
+双低值 = 转债收盘价 + 转股溢价率*100
+每周最后一个交易日收盘后排名, 下周首个交易日开盘调仓(先卖后买, 等权, 10张整数手)
+在持者排名未跌出 N+BUFFER 则继续持有(调仓缓冲)
+
+用法:
+    python backtest.py                      # 全量, N=10/15/20
+    python backtest.py --sample --start 2020-01-01 --end 2021-12-31 --n 15
+"""
+import os
+import sys
+import argparse
+from collections import defaultdict
+
+import numpy as np
+import pandas as pd
+
+import config as C
+
+sys.stdout.reconfigure(encoding="utf-8")
+
+REDEEM_BAD_STATUS = ("已公告强赎", "公告要强赎")  # 视为已公告强赎的状态
+
+
+# ----------------------------------------------------------------------
+# 数据加载
+# ----------------------------------------------------------------------
+
+def load_universe(sample_only=False):
+    uni = pd.read_csv(C.UNIVERSE_CSV, encoding="utf-8-sig",
+                      dtype={"SECURITY_CODE": str, "CONVERT_STOCK_CODE": str})
+    uni["code"] = uni["SECURITY_CODE"].str.zfill(6)
+    for col in ["LISTING_DATE", "DELIST_DATE", "EXPIRE_DATE"]:
+        uni[col] = pd.to_datetime(uni[col], errors="coerce")
+    for col in ["ACTUAL_ISSUE_SCALE", "TRANSFER_PRICE", "INITIAL_TRANSFER_PRICE"]:
+        uni[col] = pd.to_numeric(uni[col], errors="coerce")
+    uni["stock"] = (uni["CONVERT_STOCK_CODE"].fillna("")
+                    .str.replace(r"\..*$", "", regex=True).str.zfill(6))
+    if sample_only:  # 只保留有日线缓存的券(样本模式)
+        cached = {f[:-4] for f in os.listdir(C.CB_DAILY_DIR) if f.endswith(".csv")}
+        uni = uni[uni["code"].isin(cached)].reset_index(drop=True)
+    return uni
+
+
+def load_redeem_bad_codes():
+    """当前快照中已/将公告强赎的代码集合(无公告日期, 全期剔除, 偏保守)"""
+    if not os.path.exists(C.REDEEM_CSV):
+        return set()
+    df = pd.read_csv(C.REDEEM_CSV, encoding="utf-8-sig", dtype={"code": str})
+    df["code"] = df["code"].str.zfill(6)
+    mask = df["强赎状态"].astype(str).str.contains("强赎") & \
+           ~df["强赎状态"].astype(str).str.contains("不强赎")
+    return set(df.loc[mask, "code"])
+
+
+def load_daily(path):
+    df = pd.read_csv(path, encoding="utf-8-sig")
+    df["date"] = pd.to_datetime(df["date"])
+    return df.sort_values("date").reset_index(drop=True)
+
+
+class DataStore:
+    """按 code 懒加载日线, 提供 asof 价格查询"""
+
+    def __init__(self, uni):
+        self.cb = {}       # code -> DataFrame
+        self.stock = {}    # stock code -> DataFrame
+        for code in uni["code"]:
+            p = os.path.join(C.CB_DAILY_DIR, f"{code}.csv")
+            if os.path.exists(p):
+                self.cb[code] = load_daily(p)
+        for sc in uni["stock"].unique():
+            if not sc or sc == "000000":
+                continue
+            p = os.path.join(C.STOCK_DAILY_DIR, f"{sc}.csv")
+            if os.path.exists(p):
+                self.stock[sc] = load_daily(p)
+
+    def cb_bar(self, code, date):
+        """当日 K 线(无则 None)"""
+        df = self.cb.get(code)
+        if df is None:
+            return None
+        hit = df[df["date"] == date]
+        return hit.iloc[0] if not hit.empty else None
+
+    def cb_close_asof(self, code, date):
+        return self._asof(self.cb.get(code), date, "close")
+
+    def cb_open_asof(self, code, date):
+        return self._asof(self.cb.get(code), date, "open")
+
+    def stock_close_asof(self, sc, date):
+        return self._asof(self.stock.get(sc), date, "close")
+
+    @staticmethod
+    def _asof(df, date, col):
+        if df is None or df.empty:
+            return np.nan
+        idx = df["date"].searchsorted(date, side="right") - 1
+        if idx < 0:
+            return np.nan
+        return float(df[col].iloc[idx])
+
+    def listed_days(self, code, date):
+        """截至 date 的上市交易日数(用日线行数近似)"""
+        df = self.cb.get(code)
+        if df is None:
+            return 0
+        return int(df["date"].searchsorted(date, side="right"))
+
+    def last_bar(self, code):
+        df = self.cb.get(code)
+        return df.iloc[-1] if df is not None and not df.empty else None
+
+
+# ----------------------------------------------------------------------
+# 信号: 双低值与过滤
+# ----------------------------------------------------------------------
+
+def compute_rank(store, uni, signal_date, data_max_date, redeem_bad):
+    """返回当日通过过滤的候选 DataFrame(含双低值, 升序)"""
+    tp_cutoff = data_max_date - pd.Timedelta(days=C.TP_RECENT_DAYS)
+    rows = []
+    for r in uni.itertuples():
+        code = r.code
+        bar = store.cb_bar(code, signal_date)
+        if bar is None or not np.isfinite(bar["close"]):
+            continue  # 当日无成交价
+        close = float(bar["close"])
+        if close > C.MAX_PRICE:
+            continue
+        if code in redeem_bad:
+            continue
+        if pd.isna(r.LISTING_DATE) or r.LISTING_DATE > signal_date:
+            continue
+        if store.listed_days(code, signal_date) < C.MIN_LISTED_DAYS:
+            continue
+        if pd.notna(r.DELIST_DATE) and r.DELIST_DATE <= signal_date:
+            continue
+        if pd.isna(r.EXPIRE_DATE) or r.EXPIRE_DATE <= signal_date + pd.DateOffset(years=C.MIN_EXPIRE_YEARS):
+            continue
+        if not np.isfinite(r.ACTUAL_ISSUE_SCALE) or r.ACTUAL_ISSUE_SCALE < C.MIN_ISSUE_SCALE:
+            continue
+        rating = str(r.RATING).strip() if pd.notna(r.RATING) else ""
+        if rating not in C.ALLOWED_RATINGS:
+            continue
+        # 转股溢价率: 收盘价 / (正股价*100/转股价) - 1
+        sc_close = store.stock_close_asof(r.stock, signal_date)
+        tp = r.TRANSFER_PRICE if signal_date >= tp_cutoff else r.INITIAL_TRANSFER_PRICE
+        if not np.isfinite(sc_close) or not np.isfinite(tp) or tp <= 0:
+            continue
+        conv_value = sc_close * 100.0 / tp
+        if conv_value <= 0:
+            continue
+        premium = close / conv_value - 1.0
+        rows.append({"code": code, "close": close, "premium": premium,
+                     "double_low": close + premium * 100.0})
+    if not rows:
+        return pd.DataFrame(columns=["code", "close", "premium", "double_low", "rank"])
+    df = pd.DataFrame(rows).sort_values("double_low").reset_index(drop=True)
+    df["rank"] = df.index
+    return df
+
+
+def select_target(ranked, holdings, n):
+    """缓冲轮动: 在持且排名 < N+BUFFER 保留, 其余名额按双低升序补足"""
+    rank_map = dict(zip(ranked["code"], ranked["rank"]))
+    target = [c for c in holdings
+              if c in rank_map and rank_map[c] < n + C.BUFFER_RANK]
+    held = set(target)
+    for c in ranked["code"]:
+        if len(target) >= n:
+            break
+        if c not in held:
+            target.append(c)
+    return target[:n]
+
+
+# ----------------------------------------------------------------------
+# 回测引擎
+# ----------------------------------------------------------------------
+
+def run_backtest(uni, store, bench, n, start_date, end_date):
+    cal = bench["date"].tolist()
+    cal = [d for d in cal if d >= start_date and (end_date is None or d <= end_date)]
+    if len(cal) < 10:
+        raise RuntimeError("交易日历过短, 检查基准数据")
+    data_max_date = bench["date"].max()
+    redeem_bad = load_redeem_bad_codes()
+
+    # 周分组: 每周最后交易日发信号, 下周首交易日执行
+    weeks = defaultdict(list)
+    for d in cal:
+        weeks[d.isocalendar()[:2]].append(d)
+    week_list = [weeks[k] for k in sorted(weeks.keys())]
+
+    cash = float(C.INITIAL_CASH)
+    holdings = {}          # code -> 张数
+    last_price = {}        # code -> 最近已知收盘价(估值用)
+    trades = []            # (date, code, side, price, qty, amount, reason)
+    equity_rows = []
+    started = False
+
+    def portfolio_value(date):
+        v = cash
+        for c, q in holdings.items():
+            px = store.cb_close_asof(c, date)
+            if np.isfinite(px):
+                last_price[c] = px
+            px = last_price.get(c)  # 无当日价用最近已知价估值
+            if px is not None:
+                v += q * px
+        return v
+
+    for wi, days in enumerate(week_list):
+        signal_date = days[-1]
+        exec_days = week_list[wi + 1] if wi + 1 < len(week_list) else None
+
+        if exec_days is not None:
+            ranked = compute_rank(store, uni, signal_date, data_max_date, redeem_bad)
+            target = select_target(ranked, holdings, n)
+            exec_date = exec_days[0]
+
+            # ---- 先卖 ----
+            for code in list(holdings.keys()):
+                forced = False
+                bar = store.cb_bar(code, exec_date)
+                lb = store.last_bar(code)
+                # 强制退出: 到期退市, 以最后可得收盘价了结
+                if bar is None and lb is not None and lb["date"] <= exec_date:
+                    price = float(lb["close"]) * (1 - C.SLIPPAGE)
+                    amount = holdings[code] * price * (1 - C.COMMISSION)
+                    cash += amount
+                    trades.append((lb["date"], code, "SELL", float(lb["close"]),
+                                   holdings[code], amount, "delist_exit"))
+                    del holdings[code]
+                    continue
+                if code in target:
+                    continue
+                # 普通轮动卖出: 当周内有成交日的开盘价执行, 否则顺延
+                sold = False
+                for d in exec_days:
+                    b = store.cb_bar(code, d)
+                    if b is not None and np.isfinite(b["open"]):
+                        price = float(b["open"]) * (1 - C.SLIPPAGE)
+                        amount = holdings[code] * price * (1 - C.COMMISSION)
+                        cash += amount
+                        trades.append((d, code, "SELL", float(b["open"]),
+                                       holdings[code], amount, "rotate_out"))
+                        del holdings[code]
+                        sold = True
+                        break
+                if not sold:
+                    pass  # 全周停牌, 下周再处理(继续持有)
+            started = started or bool(trades)
+
+            # ---- 后买 ----
+            buys = [c for c in target if c not in holdings]
+            if buys:
+                equity = portfolio_value(exec_date)
+                tgt_val = equity / n
+                for code in buys:
+                    bought = False
+                    for d in exec_days:
+                        b = store.cb_bar(code, d)
+                        if b is None or not np.isfinite(b["open"]):
+                            continue
+                        open_px = float(b["open"])
+                        eff_px = open_px * (1 + C.SLIPPAGE)
+                        lots = int(tgt_val / (eff_px * 10))  # 1手=10张
+                        qty = lots * 10
+                        if qty <= 0:
+                            break
+                        amount = qty * eff_px * (1 + C.COMMISSION)
+                        if amount > cash:
+                            lots = int(cash / (eff_px * (1 + C.COMMISSION) * 10))
+                            qty = lots * 10
+                            if qty <= 0:
+                                break
+                            amount = qty * eff_px * (1 + C.COMMISSION)
+                        cash -= amount
+                        holdings[code] = holdings.get(code, 0) + qty
+                        trades.append((d, code, "BUY", open_px, qty, amount, "rotate_in"))
+                        bought = True
+                        break
+                    if not bought:
+                        pass  # 全周无成交, 放弃该笔
+
+        # ---- 每日估值 ----
+        for d in days:
+            if not started and not holdings:
+                continue
+            equity_rows.append({"date": d, "equity": portfolio_value(d)})
+
+    equity = pd.DataFrame(equity_rows).drop_duplicates(subset="date")
+    tr = pd.DataFrame(trades, columns=["date", "code", "side", "price",
+                                       "qty", "amount", "reason"])
+    return equity, tr
+
+
+# ----------------------------------------------------------------------
+# 绩效指标
+# ----------------------------------------------------------------------
+
+def perf_metrics(equity, bench, trades, n):
+    eq = equity.set_index("date")["equity"].sort_index()
+    ret = eq.pct_change().dropna()
+    total = eq.iloc[-1] / eq.iloc[0] - 1
+    years = (eq.index[-1] - eq.index[0]).days / 365.25
+    ann = (1 + total) ** (1 / years) - 1 if years > 0 else np.nan
+    dd = (eq / eq.cummax() - 1).min()
+    sharpe = ret.mean() / ret.std() * np.sqrt(252) if ret.std() > 0 else np.nan
+    calmar = ann / abs(dd) if dd != 0 else np.nan
+    weekly = eq.resample("W").last().pct_change().dropna()
+    win_rate = (weekly > 0).mean() if len(weekly) else np.nan
+    yearly = (eq.resample("YE").last().pct_change())
+    first_year = eq[eq.index.year == eq.index[0].year]
+    yearly.iloc[0] = first_year.iloc[-1] / eq.iloc[0] - 1
+    yearly.index = yearly.index.year
+
+    # 基准同期
+    b = bench.set_index("date")["close"].sort_index()
+    b = b[(b.index >= eq.index[0]) & (b.index <= eq.index[-1])]
+    b_total = b.iloc[-1] / b.iloc[0] - 1 if len(b) > 1 else np.nan
+    b_ann = (1 + b_total) ** (1 / years) - 1 if years > 0 and np.isfinite(b_total) else np.nan
+
+    summary = {
+        "N": n,
+        "区间": f"{eq.index[0].date()} ~ {eq.index[-1].date()}",
+        "期末净值": round(eq.iloc[-1] / eq.iloc[0], 4),
+        "总收益率": f"{total:.2%}",
+        "年化收益": f"{ann:.2%}",
+        "最大回撤": f"{dd:.2%}",
+        "夏普": round(sharpe, 3),
+        "Calmar": round(calmar, 3),
+        "周胜率": f"{win_rate:.2%}",
+        "交易次数": len(trades),
+        "基准总收益": f"{b_total:.2%}",
+        "基准年化": f"{b_ann:.2%}",
+    }
+    return summary, yearly
+
+
+# ----------------------------------------------------------------------
+# 主流程
+# ----------------------------------------------------------------------
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--sample", action="store_true", help="只用有日线缓存的样本券")
+    ap.add_argument("--start", default=C.START_DATE)
+    ap.add_argument("--end", default=C.END_DATE)
+    ap.add_argument("--n", default=",".join(map(str, C.N_LIST)),
+                    help="持仓只数, 逗号分隔, 如 10,15,20")
+    args = ap.parse_args()
+
+    start_date = pd.Timestamp(args.start)
+    end_date = pd.Timestamp(args.end) if args.end else None
+
+    print("加载数据 ...")
+    uni = load_universe(sample_only=args.sample)
+    print(f"宇宙 {len(uni)} 只{'(样本)' if args.sample else ''}")
+    store = DataStore(uni)
+    bench = load_daily(C.BENCH_CSV)
+    print(f"转债日线 {len(store.cb)} 只, 正股日线 {len(store.stock)} 只, "
+          f"基准 {len(bench)} 行")
+
+    os.makedirs(C.OUTPUT_DIR, exist_ok=True)
+    summaries = []
+    for n in [int(x) for x in args.n.split(",")]:
+        print(f"\n===== 回测 N={n} =====")
+        equity, trades = run_backtest(uni, store, bench, n, start_date, end_date)
+        if equity.empty:
+            print("  无回测结果(检查区间与数据)")
+            continue
+        summary, yearly = perf_metrics(equity, bench, trades, n)
+        summaries.append(summary)
+        equity.to_csv(os.path.join(C.OUTPUT_DIR, f"equity_curve_n{n}.csv"),
+                      index=False, encoding="utf-8-sig")
+        trades.to_csv(os.path.join(C.OUTPUT_DIR, f"trades_n{n}.csv"),
+                      index=False, encoding="utf-8-sig")
+        for k, v in summary.items():
+            print(f"  {k}: {v}")
+        print("  年度收益:")
+        for y, r in yearly.items():
+            print(f"    {y}: {r:.2%}")
+
+    if summaries:
+        sdf = pd.DataFrame(summaries)
+        sdf.to_csv(os.path.join(C.OUTPUT_DIR, "summary.csv"),
+                   index=False, encoding="utf-8-sig")
+        print(f"\nsummary.csv 已保存")
+
+
+if __name__ == "__main__":
+    main()
