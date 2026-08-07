@@ -279,8 +279,10 @@ def tp_at(timeline, date):
 # 信号: 双低值与过滤
 # ----------------------------------------------------------------------
 
-def compute_rank(store, uni, signal_date, deadlines, tp_timelines):
-    """返回当日通过过滤的候选 DataFrame(含双低值, 升序)"""
+def compute_rank(store, uni, signal_date, deadlines, tp_timelines, holdings=frozenset()):
+    """返回当日通过过滤的候选 DataFrame(含双低值, 升序)。
+    TAKE_PROFIT_ON 时持仓券价格上限放宽到 HOLD_MAX_PRICE(让赢家电跑),
+    但 价>MAX_PRICE 且 溢价率>TP_PROFIT_PREMIUM 的持仓券被剔除(止盈)。"""
     ban_delta = pd.Timedelta(days=C.REDEEM_BAN_DAYS)
     rows = []
     for r in uni.itertuples():
@@ -289,7 +291,11 @@ def compute_rank(store, uni, signal_date, deadlines, tp_timelines):
         if bar is None or not np.isfinite(bar["close"]):
             continue  # 当日无成交价
         close = float(bar["close"])
-        if close > C.MAX_PRICE:
+        held = code in holdings
+        if C.TAKE_PROFIT_ON and held:
+            if close > C.HOLD_MAX_PRICE:
+                continue  # 持仓价格硬上限, 强制止盈
+        elif close > C.MAX_PRICE:
             continue
         dl = deadlines.get(code)
         if dl is not None and dl - signal_date <= ban_delta:
@@ -322,6 +328,9 @@ def compute_rank(store, uni, signal_date, deadlines, tp_timelines):
         if conv_value <= 0:
             continue
         premium = close / conv_value - 1.0
+        if (C.TAKE_PROFIT_ON and held and close > C.MAX_PRICE
+                and premium > C.TP_PROFIT_PREMIUM):
+            continue  # 溢价泡沫化, 止盈
         rows.append({"code": code, "close": close, "premium": premium,
                      "double_low": close + premium * 100.0})
     if not rows:
@@ -402,11 +411,16 @@ def run_backtest(uni, store, bench, n, start_date, end_date):
                     continue
                 if code in target:
                     continue
-                # 次日开盘卖出(临近最后交易日的券标记 redeem_exit); 当日无成交则继续持有, 次日再试
+                # 次日开盘卖出; 当日无成交则继续持有, 次日再试
                 if bar is not None and np.isfinite(bar["open"]):
                     dl = deadlines.get(code)
-                    reason = ("redeem_exit" if dl is not None and dl - d <= ban_delta
-                              else "rotate_out")
+                    sig_close = store.cb_close_asof(code, cal[di - 1]) if di >= 1 else np.nan
+                    if dl is not None and dl - d <= ban_delta:
+                        reason = "redeem_exit"
+                    elif C.TAKE_PROFIT_ON and np.isfinite(sig_close) and sig_close > C.MAX_PRICE:
+                        reason = "take_profit"
+                    else:
+                        reason = "rotate_out"
                     price = float(bar["open"]) * (1 - C.SLIPPAGE)
                     amount = holdings[code] * price * (1 - C.COMMISSION)
                     cash += amount
@@ -448,7 +462,7 @@ def run_backtest(uni, store, bench, n, start_date, end_date):
         # ---- 收盘后发信号(次日开盘执行) ----
         if di + 1 >= len(cal):
             break
-        ranked = compute_rank(store, uni, d, deadlines, tp_timelines)
+        ranked = compute_rank(store, uni, d, deadlines, tp_timelines, set(holdings))
         pending_target = select_target(ranked, holdings, n)
 
     equity = pd.DataFrame(equity_rows).drop_duplicates(subset="date")

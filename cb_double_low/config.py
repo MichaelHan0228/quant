@@ -30,6 +30,14 @@ MIN_AVG_AMOUNT = 0         # 近20日日均成交额下限(元), 0=关闭。
                            # 实测: 1000万门槛误杀43~61%的券(年化13.3%→2.2%), 300万门槛→7.8%;
                            # 双低alpha集中在流动性偏弱的中小盘债, 零售级组合(100万)0.1%滑点已够, 默认关闭;
                            # 组合 >500万 时建议开 3e6~5e6 防冲击成本
+
+# ---------- 止盈线实验 ----------
+# 买入仍卡 MAX_PRICE; 开启后持仓券放宽到 HOLD_MAX_PRICE,
+# 仅当 价>HOLD_MAX_PRICE 或 (价>MAX_PRICE 且 溢价率>TP_PROFIT_PREMIUM) 时才强制跌出候选被卖出
+# 即"让赢家多跑一段, 除非溢价泡沫化"。TAKE_PROFIT_ON=False 时与旧逻辑一致(价>130即轮出)
+TAKE_PROFIT_ON = True
+HOLD_MAX_PRICE = 140.0
+TP_PROFIT_PREMIUM = 0.30
 # 评级 >= A+ 的允许集合(排除 A/A-/BBB 及更低、无评级)
 ALLOWED_RATINGS = {"AAA", "AA+", "AA", "AA-", "A+"}
 
