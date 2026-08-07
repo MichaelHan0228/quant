@@ -1,18 +1,26 @@
 # -*- coding: utf-8 -*-
-"""双低可转债轮动 —— 周频回测引擎 + 绩效指标
+"""双低可转债轮动 —— 每日检查回测引擎 + 绩效指标
 
 双低值 = 转债收盘价 + 转股溢价率*100
-每周最后一个交易日收盘后排名, 下周首个交易日开盘调仓(先卖后买, 等权, 10张整数手)
-在持者排名未跌出 N+BUFFER 则继续持有(调仓缓冲)
+每日收盘后排名, 次日开盘调仓(先卖后买, 等权, 10张整数手)
+在持者排名未跌出 N+BUFFER 则继续持有(调仓缓冲, 逻辑与周频版一致)
+每日检查的意义: 强赎公告等风险事件次日开盘即可退出, 不用等到周末
 
 用法:
-    python backtest.py                      # 全量, N=10/15/20
+    python backtest.py                      # 全量, 默认 N=10
     python backtest.py --sample --start 2020-01-01 --end 2021-12-31 --n 15
 """
 import os
 import sys
 import argparse
-from collections import defaultdict
+
+# 项目内 signal.py 会遮蔽标准库 signal(numpy/pandas 依赖链需要),
+# 把脚本目录/空串/cwd 移到 sys.path 末尾, 让标准库优先
+_script_dir = os.path.dirname(os.path.abspath(__file__))
+for _p in (_script_dir, "", os.getcwd()):
+    while _p in sys.path:
+        sys.path.remove(_p)
+sys.path.append(_script_dir)
 
 import numpy as np
 import pandas as pd
@@ -191,12 +199,6 @@ def run_backtest(uni, store, bench, n, start_date, end_date):
     data_max_date = bench["date"].max()
     redeem_bad = load_redeem_bad_codes()
 
-    # 周分组: 每周最后交易日发信号, 下周首交易日执行
-    weeks = defaultdict(list)
-    for d in cal:
-        weeks[d.isocalendar()[:2]].append(d)
-    week_list = [weeks[k] for k in sorted(weeks.keys())]
-
     cash = float(C.INITIAL_CASH)
     holdings = {}          # code -> 张数
     last_price = {}        # code -> 最近已知收盘价(估值用)
@@ -215,18 +217,17 @@ def run_backtest(uni, store, bench, n, start_date, end_date):
                 v += q * px
         return v
 
-    for wi, days in enumerate(week_list):
-        signal_date = days[-1]
-        exec_days = week_list[wi + 1] if wi + 1 < len(week_list) else None
-
-        if exec_days is not None:
-            ranked = compute_rank(store, uni, signal_date, data_max_date, redeem_bad)
-            target = select_target(ranked, holdings, n)
-            exec_date = exec_days[0]
+    # 每日循环: 开盘执行昨日信号 -> 当日估值 -> 收盘算新信号(次日执行)
+    # 排名/缓冲逻辑与周频版完全一致; 每日检查使强赎等风险次日即可退出
+    pending_target = None
+    for di, d in enumerate(cal):
+        # ---- 开盘执行昨日信号(先卖后买) ----
+        if pending_target is not None:
+            target = pending_target
+            exec_date = d
 
             # ---- 先卖 ----
             for code in list(holdings.keys()):
-                forced = False
                 bar = store.cb_bar(code, exec_date)
                 lb = store.last_bar(code)
                 # 强制退出: 到期退市, 以最后可得收盘价了结
@@ -240,21 +241,15 @@ def run_backtest(uni, store, bench, n, start_date, end_date):
                     continue
                 if code in target:
                     continue
-                # 普通轮动卖出: 当周内有成交日的开盘价执行, 否则顺延
-                sold = False
-                for d in exec_days:
-                    b = store.cb_bar(code, d)
-                    if b is not None and np.isfinite(b["open"]):
-                        price = float(b["open"]) * (1 - C.SLIPPAGE)
-                        amount = holdings[code] * price * (1 - C.COMMISSION)
-                        cash += amount
-                        trades.append((d, code, "SELL", float(b["open"]),
-                                       holdings[code], amount, "rotate_out"))
-                        del holdings[code]
-                        sold = True
-                        break
-                if not sold:
-                    pass  # 全周停牌, 下周再处理(继续持有)
+                # 次日开盘卖出(强赎券标记 redeem_exit); 当日无成交则继续持有, 次日再试
+                if bar is not None and np.isfinite(bar["open"]):
+                    reason = "redeem_exit" if code in redeem_bad else "rotate_out"
+                    price = float(bar["open"]) * (1 - C.SLIPPAGE)
+                    amount = holdings[code] * price * (1 - C.COMMISSION)
+                    cash += amount
+                    trades.append((exec_date, code, "SELL", float(bar["open"]),
+                                   holdings[code], amount, reason))
+                    del holdings[code]
             started = started or bool(trades)
 
             # ---- 后买 ----
@@ -263,37 +258,35 @@ def run_backtest(uni, store, bench, n, start_date, end_date):
                 equity = portfolio_value(exec_date)
                 tgt_val = equity / n
                 for code in buys:
-                    bought = False
-                    for d in exec_days:
-                        b = store.cb_bar(code, d)
-                        if b is None or not np.isfinite(b["open"]):
-                            continue
-                        open_px = float(b["open"])
-                        eff_px = open_px * (1 + C.SLIPPAGE)
-                        lots = int(tgt_val / (eff_px * 10))  # 1手=10张
+                    b = store.cb_bar(code, exec_date)
+                    if b is None or not np.isfinite(b["open"]):
+                        continue  # 当日无成交, 放弃该笔, 次日信号重算后再试
+                    open_px = float(b["open"])
+                    eff_px = open_px * (1 + C.SLIPPAGE)
+                    lots = int(tgt_val / (eff_px * 10))  # 1手=10张
+                    qty = lots * 10
+                    if qty <= 0:
+                        continue
+                    amount = qty * eff_px * (1 + C.COMMISSION)
+                    if amount > cash:
+                        lots = int(cash / (eff_px * (1 + C.COMMISSION) * 10))
                         qty = lots * 10
                         if qty <= 0:
-                            break
+                            continue
                         amount = qty * eff_px * (1 + C.COMMISSION)
-                        if amount > cash:
-                            lots = int(cash / (eff_px * (1 + C.COMMISSION) * 10))
-                            qty = lots * 10
-                            if qty <= 0:
-                                break
-                            amount = qty * eff_px * (1 + C.COMMISSION)
-                        cash -= amount
-                        holdings[code] = holdings.get(code, 0) + qty
-                        trades.append((d, code, "BUY", open_px, qty, amount, "rotate_in"))
-                        bought = True
-                        break
-                    if not bought:
-                        pass  # 全周无成交, 放弃该笔
+                    cash -= amount
+                    holdings[code] = holdings.get(code, 0) + qty
+                    trades.append((exec_date, code, "BUY", open_px, qty, amount, "rotate_in"))
 
-        # ---- 每日估值 ----
-        for d in days:
-            if not started and not holdings:
-                continue
+        # ---- 当日估值 ----
+        if started or holdings:
             equity_rows.append({"date": d, "equity": portfolio_value(d)})
+
+        # ---- 收盘后发信号(次日开盘执行) ----
+        if di + 1 >= len(cal):
+            break
+        ranked = compute_rank(store, uni, d, data_max_date, redeem_bad)
+        pending_target = select_target(ranked, holdings, n)
 
     equity = pd.DataFrame(equity_rows).drop_duplicates(subset="date")
     tr = pd.DataFrame(trades, columns=["date", "code", "side", "price",
