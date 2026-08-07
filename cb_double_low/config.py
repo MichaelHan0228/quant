@@ -26,6 +26,10 @@ MIN_LISTED_DAYS = 10       # 已上市交易日数下限
 MIN_EXPIRE_YEARS = 1       # 距到期 > 1 年
 MIN_ISSUE_SCALE = 3.0      # 发行规模(亿)下限
 MAX_PRICE = 130.0          # 收盘价上限
+MIN_AVG_AMOUNT = 0         # 近20日日均成交额下限(元), 0=关闭。
+                           # 实测: 1000万门槛误杀43~61%的券(年化13.3%→2.2%), 300万门槛→7.8%;
+                           # 双低alpha集中在流动性偏弱的中小盘债, 零售级组合(100万)0.1%滑点已够, 默认关闭;
+                           # 组合 >500万 时建议开 3e6~5e6 防冲击成本
 # 评级 >= A+ 的允许集合(排除 A/A-/BBB 及更低、无评级)
 ALLOWED_RATINGS = {"AAA", "AA+", "AA", "AA-", "A+"}
 
@@ -33,9 +37,16 @@ ALLOWED_RATINGS = {"AAA", "AA+", "AA", "AA-", "A+"}
 COMMISSION = 0.0001        # 佣金 万1, 双边
 SLIPPAGE = 0.001           # 单边滑点 0.1%
 
-# ---------- 转股价近似 ----------
-# 数据最新日期往前 TP_RECENT_DAYS 个日历日内用当前 TRANSFER_PRICE, 更早用 INITIAL_TRANSFER_PRICE
-TP_RECENT_DAYS = 60
+# ---------- 强赎/退市窗口 ----------
+REDEEM_BAN_DAYS = 30       # 距最后交易日 <= N 天: 禁止买入(持仓券随之跌出候选被卖出)
+
+# ---------- 转股价时间轴 ----------
+DIVIDENDS_DIR = os.path.join(DATA_DIR, "dividends")  # 正股分红送转(每股事件 → 逐次调整转股价)
+REVISIONS_CSV = os.path.join(DATA_DIR, "downward_revisions.csv")  # 下修公告记录(stock,date)
+# 下修新价估算开关: 默认关。实测两个失效模式——①同股票多只债时会错配(金田转债误用金铜转债记录);
+# ②部分公司不修到底(平煤转债估4.39 vs 实际7.46), 低估TP会高估转股价值→错买, 方向危险。
+# 保持关闭时仅误差方向为"下修券溢价率高估→少买", 偏保守。
+APPLY_REVISION_EST = False
 
 # ---------- 抓取参数 ----------
 CB_FETCH_SLEEP = 0.4       # akshare 转债日线批量抓取间隔(防封IP)

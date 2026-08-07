@@ -32,7 +32,7 @@ def fetch_comparison():
         "pn": 1, "pz": 100, "po": 1, "np": 1,
         "ut": "bd1d9ddb04089700cf9c27f6f7426281",
         "fltt": 2, "invt": 2, "fid": "f243", "fs": "b:MK0354",
-        "fields": "f2,f12,f14,f227,f229,f232,f234,f236,f243",
+        "fields": "f2,f6,f12,f14,f227,f229,f232,f234,f236,f243",
     }
     rows, page = [], 1
     while True:
@@ -57,12 +57,12 @@ def fetch_comparison():
         page += 1
     df = pd.DataFrame(rows)
     df = df.rename(columns={
-        "f2": "转债最新价", "f12": "code", "f14": "转债名称", "f227": "上市日期",
+        "f2": "转债最新价", "f6": "成交额", "f12": "code", "f14": "转债名称", "f227": "上市日期",
         "f229": "纯债价值", "f232": "正股最新价", "f234": "转股价",
         "f236": "转股价值", "f243": "转股溢价率",
     })
     df["code"] = df["code"].astype(str).str.zfill(6)
-    for col in ["转债最新价", "正股最新价", "转股价", "转股价值", "转股溢价率"]:
+    for col in ["转债最新价", "正股最新价", "转股价", "转股价值", "转股溢价率", "成交额"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
     df["双低值"] = df["转债最新价"] + df["转股溢价率"]
     return df
@@ -71,7 +71,7 @@ def fetch_comparison():
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--holdings", default="", help="在持转债代码, 逗号分隔")
-    ap.add_argument("--n", type=int, default=15)
+    ap.add_argument("--n", type=int, default=10)
     args = ap.parse_args()
     holdings = [c.strip().zfill(6) for c in args.holdings.split(",") if c.strip()]
 
@@ -89,8 +89,13 @@ def main():
         u = uni.loc[code]
         if code in redeem_bad:
             continue
+        # 临近最后交易日(强赎/到期)禁买, 与回测 REDEEM_BAN_DAYS 口径一致
+        if pd.notna(u["DELIST_DATE"]) and u["DELIST_DATE"] - today <= pd.Timedelta(days=C.REDEEM_BAN_DAYS):
+            continue
         if not pd.notna(r["转债最新价"]) or r["转债最新价"] > C.MAX_PRICE:
             continue
+        if pd.notna(r["成交额"]) and r["成交额"] < C.MIN_AVG_AMOUNT:
+            continue  # 当日成交额不足(实时单口径, 回测用20日均值)
         if pd.isna(u["EXPIRE_DATE"]) or u["EXPIRE_DATE"] <= today + pd.DateOffset(years=C.MIN_EXPIRE_YEARS):
             continue
         if not pd.notna(u["ACTUAL_ISSUE_SCALE"]) or u["ACTUAL_ISSUE_SCALE"] < C.MIN_ISSUE_SCALE:
