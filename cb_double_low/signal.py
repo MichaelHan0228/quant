@@ -10,6 +10,7 @@
     python signal.py --holdings 113050,128013 --n 15
 """
 import sys
+import time
 import argparse
 from datetime import datetime
 
@@ -17,7 +18,7 @@ import pandas as pd
 import requests
 
 import config as C
-from backtest import load_universe, load_redeem_bad_codes
+from backtest import load_universe, load_redeem_bad_codes, clean_rating
 
 sys.stdout.reconfigure(encoding="utf-8")
 
@@ -68,6 +69,45 @@ def fetch_comparison():
     return df
 
 
+def fetch_remain_shares(code):
+    """东财 push2 stock/get 的 f84 = 转债剩余张数; 全部重试失败返回 None"""
+    secid = ("1." if code.startswith("11") else "0.") + code
+    url = "https://push2.eastmoney.com/api/qt/stock/get"
+    params = {"secid": secid, "fields": "f84",
+              "ut": "bd1d9ddb04089700cf9c27f6f7426281", "fltt": 2, "invt": 2}
+    for _ in range(C.RETRY_TIMES):
+        try:
+            r = requests.get(url, params=params, headers=HEADERS, timeout=10)
+            v = (r.json().get("data") or {}).get("f84")
+            return float(v) if isinstance(v, (int, float)) else None
+        except Exception:
+            time.sleep(C.RETRY_INTERVAL)
+    return None
+
+
+def attach_remain_scale(df):
+    """给候选表加 剩余规模(亿) 列并剔除不足 MIN_REMAIN_SCALE 的券。
+    push2 拉取失败的券保留并告警(不崩, 宁可漏过滤)。"""
+    df = df.copy()
+    if df.empty:
+        df["剩余规模(亿)"] = pd.Series(dtype=float)
+        return df
+    vals, failed = [], 0
+    for code in df["code"]:
+        sh = fetch_remain_shares(code)
+        if sh is None:
+            failed += 1
+            vals.append(None)
+        else:
+            vals.append(round(sh * 100.0 / 1e8, 2))  # 张×100元 → 亿
+        time.sleep(0.2)
+    df["剩余规模(亿)"] = vals
+    if failed:
+        print(f"[WARN] {failed} 只券剩余张数拉取失败(push2 断连?), "
+              f"这些券跳过剩余规模过滤")
+    return df[df["剩余规模(亿)"].isna() | (df["剩余规模(亿)"] >= C.MIN_REMAIN_SCALE)]
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--holdings", default="", help="在持转债代码, 逗号分隔")
@@ -100,7 +140,7 @@ def main():
             continue
         if not pd.notna(u["ACTUAL_ISSUE_SCALE"]) or u["ACTUAL_ISSUE_SCALE"] < C.MIN_ISSUE_SCALE:
             continue
-        rating = str(u["RATING"]).strip() if pd.notna(u["RATING"]) else ""
+        rating = clean_rating(u["RATING"]) if pd.notna(u["RATING"]) else ""
         if rating not in C.ALLOWED_RATINGS:
             continue
         if pd.isna(u["LISTING_DATE"]):  # 上市天数在实时表无法精确, 粗过滤
@@ -108,6 +148,12 @@ def main():
         rows.append({"code": code, "转债名称": r["转债名称"], "转债最新价": r["转债最新价"],
                      "转股溢价率": r["转股溢价率"], "双低值": r["双低值"]})
     df = pd.DataFrame(rows).sort_values("双低值").reset_index(drop=True)
+    df["rank"] = df.index
+
+    # 剩余规模过滤: clist 无剩余张数字段(f84 实测返回 '-'),
+    # 先取双低前 50 候选, 逐个调 push2 stock/get 取 f84(剩余张数),
+    # 剩余规模(亿) = f84×100元/1e8 < MIN_REMAIN_SCALE 的剔除。
+    df = attach_remain_scale(df.head(50)).reset_index(drop=True)
     df["rank"] = df.index
 
     print(f"\n=== 双低 Top-{args.n} (过滤后共 {len(df)} 只) ===")

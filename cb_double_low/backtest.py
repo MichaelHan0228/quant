@@ -12,6 +12,7 @@
 """
 import os
 import sys
+import re
 import argparse
 from bisect import bisect_right
 
@@ -160,6 +161,8 @@ def load_dividend_events():
     """正股分红送转事件: stock -> [(date, 每股股息, 每股送转比例)], 按日期排序"""
     events = {}
     if not os.path.isdir(C.DIVIDENDS_DIR):
+        print(f"[WARN] 分红目录缺失: {C.DIVIDENDS_DIR} —— 转股价将不做分红送转调整,"
+              f" 溢价率系统性偏高(少买), 请先运行 fetch_cb_data.py 的分红阶段补采")
         return events
     for f in os.listdir(C.DIVIDENDS_DIR):
         if not f.endswith(".csv"):
@@ -276,14 +279,95 @@ def tp_at(timeline, date):
 
 
 # ----------------------------------------------------------------------
+# 剩余规模时间轴(累计转股比例) 与 评级事件资格表
+# ----------------------------------------------------------------------
+
+def clean_rating(s):
+    """评级归一化: strip 后去掉末尾大小写不敏感的 sti 后缀(东财附加标记)"""
+    s = str(s).strip()
+    s = re.sub(r"(?i)\s*sti\s*$", "", s).strip()
+    return s
+
+
+def load_conversion_timelines():
+    """读 data/conversion/*.csv -> {code: (dates, conv_rates_pct)}, 按日期升序"""
+    out = {}
+    if not os.path.isdir(C.CONVERSION_DIR):
+        return out
+    for f in os.listdir(C.CONVERSION_DIR):
+        if not f.endswith(".csv"):
+            continue
+        try:
+            df = pd.read_csv(os.path.join(C.CONVERSION_DIR, f),
+                             encoding="utf-8-sig")
+            df["date"] = pd.to_datetime(df["date"], errors="coerce")
+            df = df.dropna(subset=["date"]).sort_values("date")
+            if df.empty:
+                continue
+            out[f[:-4].zfill(6)] = (df["date"].tolist(),
+                                    df["conv_rate_pct"].astype(float).tolist())
+        except Exception:
+            continue
+    return out
+
+
+def conv_rate_at(timeline, date):
+    """截至 date 的累计转股比例(%, 最后一条不晚于 date 的记录); 无记录=0"""
+    if timeline is None:
+        return 0.0
+    dates, rates = timeline
+    idx = bisect_right(dates, date) - 1
+    return rates[idx] if idx >= 0 else 0.0
+
+
+def build_rating_eligibility(uni):
+    """评级资格表: {code: None 或 Timestamp}
+
+    None        = 任何日期合格(clean 快照 >= A+)
+    Timestamp D = 首次跌破 A+ 的公告日(t < D 合格, t >= D 不合格)
+    Timestamp.min = 始终不合格(快照 <A+ 且无可用评级事件)
+
+    缺失 rating_events.csv 时返回 None, compute_rank 回退旧行为(快照精确匹配)。
+    """
+    if not os.path.exists(C.RATING_EVENTS_CSV):
+        print("[WARN] 缺少 data/rating_events.csv, 评级过滤回退为最新快照精确匹配"
+              "(有前视偏差); 请先运行 fetch_rating_events.py")
+        return None
+    ev = pd.read_csv(C.RATING_EVENTS_CSV, encoding="utf-8-sig",
+                     dtype={"code": str, "stock": str})
+    ev["code"] = ev["code"].str.zfill(6)
+    ev["date"] = pd.to_datetime(ev["date"], errors="coerce")
+    ev = ev[(ev["parse_ok"] == True) & ev["date"].notna()]
+    # 每只低评级券首次跌破 A+ 的公告日
+    first_bad = {}
+    for code, g in ev.groupby("code"):
+        g = g.sort_values("date")
+        for r in g.itertuples():
+            nr = clean_rating(r.new_rating) if pd.notna(r.new_rating) else ""
+            if nr and nr not in C.ALLOWED_RATINGS:
+                first_bad[code] = r.date
+                break
+    out = {}
+    for r in uni.itertuples():
+        snap = clean_rating(r.RATING) if pd.notna(r.RATING) else ""
+        if snap in C.ALLOWED_RATINGS:
+            out[r.code] = None
+        else:
+            out[r.code] = first_bad.get(r.code, pd.Timestamp.min)
+    return out
+
+
+# ----------------------------------------------------------------------
 # 信号: 双低值与过滤
 # ----------------------------------------------------------------------
 
-def compute_rank(store, uni, signal_date, deadlines, tp_timelines, holdings=frozenset()):
+def compute_rank(store, uni, signal_date, deadlines, tp_timelines, holdings=frozenset(),
+                 conv_timelines=None, rating_eligibility=None):
     """返回当日通过过滤的候选 DataFrame(含双低值, 升序)。
     TAKE_PROFIT_ON 时持仓券价格上限放宽到 HOLD_MAX_PRICE(让赢家电跑),
     但 价>MAX_PRICE 且 溢价率>TP_PROFIT_PREMIUM 的持仓券被剔除(止盈)。"""
     ban_delta = pd.Timedelta(days=C.REDEEM_BAN_DAYS)
+    conv_timelines = conv_timelines or {}
     rows = []
     for r in uni.itertuples():
         code = r.code
@@ -308,11 +392,22 @@ def compute_rank(store, uni, signal_date, deadlines, tp_timelines, holdings=froz
             continue
         if pd.isna(r.EXPIRE_DATE) or r.EXPIRE_DATE <= signal_date + pd.DateOffset(years=C.MIN_EXPIRE_YEARS):
             continue
-        if not np.isfinite(r.ACTUAL_ISSUE_SCALE) or r.ACTUAL_ISSUE_SCALE < C.MIN_ISSUE_SCALE:
+        # 剩余规模 = 发行规模 × (1 - 累计转股比例asof); 无时间轴 → 转股比例0 → 剩余=发行规模
+        if not np.isfinite(r.ACTUAL_ISSUE_SCALE):
             continue
-        rating = str(r.RATING).strip() if pd.notna(r.RATING) else ""
-        if rating not in C.ALLOWED_RATINGS:
-            continue
+        cr = min(conv_rate_at(conv_timelines.get(code), signal_date), 100.0)
+        remain = r.ACTUAL_ISSUE_SCALE * (1.0 - cr / 100.0)
+        if remain < C.MIN_REMAIN_SCALE:
+            continue  # 剩余规模不足
+        if rating_eligibility is None:
+            # 回退旧行为: 最新快照精确匹配(有前视偏差, 启动时已告警)
+            rating = str(r.RATING).strip() if pd.notna(r.RATING) else ""
+            if rating not in C.ALLOWED_RATINGS:
+                continue
+        else:
+            cutoff = rating_eligibility.get(code, pd.Timestamp.min)
+            if cutoff is not None and signal_date >= cutoff:
+                continue  # 当日评级已跌破 A+(或从未合格)
         if C.MIN_AVG_AMOUNT > 0:
             amt = store.cb_avg_amount(code, signal_date)
             if not np.isfinite(amt) or amt < C.MIN_AVG_AMOUNT:
@@ -358,7 +453,11 @@ def select_target(ranked, holdings, n):
 # 回测引擎
 # ----------------------------------------------------------------------
 
-def run_backtest(uni, store, bench, n, start_date, end_date):
+def run_backtest(uni, store, bench, n, start_date, end_date, exec_mode="next_open"):
+    """exec_mode: next_open=收盘信号次日开盘成交(默认, 无前视);
+    same_close=收盘信号当日收盘成交(近似实盘 14:50 快照+尾盘竞价, 轻微前视);
+    same_vwap=收盘信号当日均价成交((high+low+close)/3 代理)——注意: 信号来自收盘,
+    当日均价成交在实盘不可严格实现, 仅作"执行时点敏感度"参考。"""
     cal = bench["date"].tolist()
     cal = [d for d in cal if d >= start_date and (end_date is None or d <= end_date)]
     if len(cal) < 10:
@@ -368,6 +467,8 @@ def run_backtest(uni, store, bench, n, start_date, end_date):
     div_events = load_dividend_events()
     rev_events = load_revision_events() if C.APPLY_REVISION_EST else {}
     tp_timelines = build_tp_timelines(uni, div_events, rev_events)
+    conv_timelines = load_conversion_timelines()
+    rating_eligibility = build_rating_eligibility(uni)
 
     cash = float(C.INITIAL_CASH)
     holdings = {}          # code -> 张数
@@ -387,11 +488,24 @@ def run_backtest(uni, store, bench, n, start_date, end_date):
                 v += q * px
         return v
 
-    # 每日循环: 开盘执行昨日信号 -> 当日估值 -> 收盘算新信号(次日执行)
-    # 排名/缓冲逻辑与周频版完全一致; 每日检查使强赎等风险次日即可退出
+    def exec_px(bar):
+        """成交基准价(未扣滑点)"""
+        if exec_mode == "next_open":
+            return float(bar["open"])
+        if exec_mode == "same_close":
+            return float(bar["close"])
+        return float((bar["high"] + bar["low"] + bar["close"]) / 3.0)  # same_vwap 代理
+
+    # 每日循环(next_open): 开盘执行昨日信号 -> 当日估值 -> 收盘算新信号(次日执行)
+    # 每日循环(same_*):   收盘算信号并当日成交 -> 当日估值
     pending_target = None
     for di, d in enumerate(cal):
-        # ---- 开盘执行昨日信号(先卖后买) ----
+        if exec_mode != "next_open":
+            # ---- 收盘算信号(用当日在持判断止盈) ----
+            ranked = compute_rank(store, uni, d, deadlines, tp_timelines, set(holdings),
+                                  conv_timelines, rating_eligibility)
+            pending_target = select_target(ranked, holdings, n)
+        # ---- 执行信号(先卖后买; next_open=次日开盘, same_*=当日) ----
         if pending_target is not None:
             target = pending_target
             exec_date = d
@@ -411,20 +525,22 @@ def run_backtest(uni, store, bench, n, start_date, end_date):
                     continue
                 if code in target:
                     continue
-                # 次日开盘卖出; 当日无成交则继续持有, 次日再试
-                if bar is not None and np.isfinite(bar["open"]):
+                # 当日无成交则继续持有, 次日再试
+                if bar is not None and np.isfinite(exec_px(bar)):
                     dl = deadlines.get(code)
-                    sig_close = store.cb_close_asof(code, cal[di - 1]) if di >= 1 else np.nan
+                    sig_close = (store.cb_close_asof(code, cal[di - 1]) if di >= 1
+                                 else np.nan) if exec_mode == "next_open" else float(bar["close"])
                     if dl is not None and dl - d <= ban_delta:
                         reason = "redeem_exit"
                     elif C.TAKE_PROFIT_ON and np.isfinite(sig_close) and sig_close > C.MAX_PRICE:
                         reason = "take_profit"
                     else:
                         reason = "rotate_out"
-                    price = float(bar["open"]) * (1 - C.SLIPPAGE)
+                    px = exec_px(bar)
+                    price = px * (1 - C.SLIPPAGE)
                     amount = holdings[code] * price * (1 - C.COMMISSION)
                     cash += amount
-                    trades.append((exec_date, code, "SELL", float(bar["open"]),
+                    trades.append((exec_date, code, "SELL", px,
                                    holdings[code], amount, reason))
                     del holdings[code]
             started = started or bool(trades)
@@ -436,10 +552,10 @@ def run_backtest(uni, store, bench, n, start_date, end_date):
                 tgt_val = equity / n
                 for code in buys:
                     b = store.cb_bar(code, exec_date)
-                    if b is None or not np.isfinite(b["open"]):
+                    if b is None or not np.isfinite(exec_px(b)):
                         continue  # 当日无成交, 放弃该笔, 次日信号重算后再试
-                    open_px = float(b["open"])
-                    eff_px = open_px * (1 + C.SLIPPAGE)
+                    raw_px = exec_px(b)
+                    eff_px = raw_px * (1 + C.SLIPPAGE)
                     lots = int(tgt_val / (eff_px * 10))  # 1手=10张
                     qty = lots * 10
                     if qty <= 0:
@@ -453,17 +569,19 @@ def run_backtest(uni, store, bench, n, start_date, end_date):
                         amount = qty * eff_px * (1 + C.COMMISSION)
                     cash -= amount
                     holdings[code] = holdings.get(code, 0) + qty
-                    trades.append((exec_date, code, "BUY", open_px, qty, amount, "rotate_in"))
+                    trades.append((exec_date, code, "BUY", raw_px, qty, amount, "rotate_in"))
 
         # ---- 当日估值 ----
         if started or holdings:
             equity_rows.append({"date": d, "equity": portfolio_value(d)})
 
-        # ---- 收盘后发信号(次日开盘执行) ----
-        if di + 1 >= len(cal):
-            break
-        ranked = compute_rank(store, uni, d, deadlines, tp_timelines, set(holdings))
-        pending_target = select_target(ranked, holdings, n)
+        # ---- 收盘后发信号(次日开盘执行), 仅 next_open 模式 ----
+        if exec_mode == "next_open":
+            if di + 1 >= len(cal):
+                break
+            ranked = compute_rank(store, uni, d, deadlines, tp_timelines, set(holdings),
+                                  conv_timelines, rating_eligibility)
+            pending_target = select_target(ranked, holdings, n)
 
     equity = pd.DataFrame(equity_rows).drop_duplicates(subset="date")
     tr = pd.DataFrame(trades, columns=["date", "code", "side", "price",
@@ -525,6 +643,9 @@ def main():
     ap.add_argument("--end", default=C.END_DATE)
     ap.add_argument("--n", default=",".join(map(str, C.N_LIST)),
                     help="持仓只数, 逗号分隔, 如 10,15,20")
+    ap.add_argument("--exec", dest="exec_mode", default="next_open",
+                    choices=["next_open", "same_close", "same_vwap"],
+                    help="执行模式: next_open=次日开盘(默认), same_close=当日收盘, same_vwap=当日均价代理")
     args = ap.parse_args()
 
     start_date = pd.Timestamp(args.start)
@@ -539,18 +660,21 @@ def main():
           f"基准 {len(bench)} 行")
 
     os.makedirs(C.OUTPUT_DIR, exist_ok=True)
+    suffix = "" if args.exec_mode == "next_open" else f"_{args.exec_mode}"
     summaries = []
     for n in [int(x) for x in args.n.split(",")]:
-        print(f"\n===== 回测 N={n} =====")
-        equity, trades = run_backtest(uni, store, bench, n, start_date, end_date)
+        print(f"\n===== 回测 N={n} exec={args.exec_mode} =====")
+        equity, trades = run_backtest(uni, store, bench, n, start_date, end_date,
+                                      exec_mode=args.exec_mode)
         if equity.empty:
             print("  无回测结果(检查区间与数据)")
             continue
         summary, yearly = perf_metrics(equity, bench, trades, n)
+        summary["exec"] = args.exec_mode
         summaries.append(summary)
-        equity.to_csv(os.path.join(C.OUTPUT_DIR, f"equity_curve_n{n}.csv"),
+        equity.to_csv(os.path.join(C.OUTPUT_DIR, f"equity_curve_n{n}{suffix}.csv"),
                       index=False, encoding="utf-8-sig")
-        trades.to_csv(os.path.join(C.OUTPUT_DIR, f"trades_n{n}.csv"),
+        trades.to_csv(os.path.join(C.OUTPUT_DIR, f"trades_n{n}{suffix}.csv"),
                       index=False, encoding="utf-8-sig")
         for k, v in summary.items():
             print(f"  {k}: {v}")
@@ -560,9 +684,9 @@ def main():
 
     if summaries:
         sdf = pd.DataFrame(summaries)
-        sdf.to_csv(os.path.join(C.OUTPUT_DIR, "summary.csv"),
+        sdf.to_csv(os.path.join(C.OUTPUT_DIR, f"summary{suffix}.csv"),
                    index=False, encoding="utf-8-sig")
-        print(f"\nsummary.csv 已保存")
+        print(f"\nsummary{suffix}.csv 已保存")
 
 
 if __name__ == "__main__":
