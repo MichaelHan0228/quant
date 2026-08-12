@@ -13,3 +13,6 @@ Thumbs.db
 # 数据缓存
 data/
 *.csv
+
+# etf_rotation 回测产出（可再生）
+etf_rotation/output/

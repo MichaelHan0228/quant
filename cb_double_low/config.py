@@ -24,8 +24,11 @@ INITIAL_CASH = 1_000_000   # 初始资金
 # ---------- 过滤条件 ----------
 MIN_LISTED_DAYS = 10       # 已上市交易日数下限
 MIN_EXPIRE_YEARS = 1       # 距到期 > 1 年
-MIN_ISSUE_SCALE = 3.0      # [已废弃] 发行规模(亿)下限 —— 已被 MIN_REMAIN_SCALE(剩余规模)取代, 不再生效
-MIN_REMAIN_SCALE = 3.0     # 剩余规模(亿)下限: 发行规模 × (1 - 累计转股比例asof)
+MIN_ISSUE_SCALE = 3.0      # 发行规模(亿)下限: MIN_REMAIN_SCALE=0 时的回退口径
+MIN_REMAIN_SCALE = 0       # 剩余规模(亿)下限: 发行规模 × (1 - 累计转股比例asof)。
+                           # 暂设为0(回退发行规模口径): szse.cn 对本机IP连接级封锁, 深市转股比例缺失
+                           # 导致过滤对沪/深不对称(实测污染结论: 开=12.7% 关=14.4%);
+                           # 换网络跑 fetch_conversion.py 补齐深市数据后设回 3.0 并重测
 MAX_PRICE = 130.0          # 收盘价上限
 MIN_AVG_AMOUNT = 0         # 近20日日均成交额下限(元), 0=关闭。
                            # 实测: 1000万门槛误杀43~61%的券(年化13.3%→2.2%), 300万门槛→7.8%;
@@ -36,9 +39,11 @@ MIN_AVG_AMOUNT = 0         # 近20日日均成交额下限(元), 0=关闭。
 # 买入仍卡 MAX_PRICE; 开启后持仓券放宽到 HOLD_MAX_PRICE,
 # 仅当 价>HOLD_MAX_PRICE 或 (价>MAX_PRICE 且 溢价率>TP_PROFIT_PREMIUM) 时才强制跌出候选被卖出
 # 即"让赢家多跑一段, 除非溢价泡沫化"。TAKE_PROFIT_ON=False 时与旧逻辑一致(价>130即轮出)
-TAKE_PROFIT_ON = True
+TAKE_PROFIT_ON = True      # 2x2 隔离实测(v2评级口径): 止盈开+过滤关 14.35%/-18.9%/夏普1.09 全面最优
 HOLD_MAX_PRICE = 140.0
 TP_PROFIT_PREMIUM = 0.30
+MAX_DOUBLE_LOW = 0         # 双低值天花板: 双低值超过此线的券直接排除(宁可持现金), 0=关闭
+                           # 网格实测: 150档在止盈关组合下年化13.33%→12.23%, 默认关闭
 # 评级 >= A+ 的允许集合(排除 A/A-/BBB 及更低、无评级)
 ALLOWED_RATINGS = {"AAA", "AA+", "AA", "AA-", "A+"}
 
