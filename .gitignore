@@ -16,3 +16,6 @@ data/
 
 # etf_rotation 回测产出（可再生）
 etf_rotation/output/
+
+# etf_rotation 实盘运行状态（本机持仓峰值/冷却期，不入库）
+etf_rotation/state_qmt.json

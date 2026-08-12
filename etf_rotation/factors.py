@@ -27,6 +27,7 @@ class Params:
     ma_n: int = 25            # cash_rule 含 'ma' 时的均线窗口
     stop_pct: float = 0.0     # 移动止损：从持仓期最高收盘回落该比例则清仓(0=关闭)
     stop_cd: int = 5          # 止损后该标的冷却天数（防立刻买回）
+    stop_sell_all: bool = True  # True=任一破位则清空整个组合(原版)；False=只卖破位标的，其余保留
     atr_mult: float = 0.0     # ATR止损：收盘 < 持仓期最高收盘 - mult×ATR 则清仓(0=关闭)
     atr_n: int = 14           # ATR 窗口（Wilder 平滑）
     atr_mult_map: dict = None # 按标的定制ATR倍数 {code: mult}，优先于 atr_mult

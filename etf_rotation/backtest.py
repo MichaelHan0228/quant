@@ -154,7 +154,12 @@ def run_backtest(scores: pd.DataFrame, panel: dict, params: Params,
                     stopped.add(c)
                     banned[c] = i + params.stop_cd
             if stopped:
-                pending = {}
+                if params.stop_sell_all:
+                    pending = {}
+                else:
+                    # 只卖破位标的：未破位持仓保留权重，空出的仓位留现金，
+                    # 次日收盘的信号环节会按评分递补（破位标的在冷却期内被排除）
+                    pending = {c: w for c, w in holdings.items() if c not in stopped}
         # ---- 收盘：计算次日信号 ----
         if pending is None:
             row = scores.loc[d].dropna()
