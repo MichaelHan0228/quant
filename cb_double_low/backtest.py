@@ -392,17 +392,13 @@ def compute_rank(store, uni, signal_date, deadlines, tp_timelines, holdings=froz
             continue
         if pd.isna(r.EXPIRE_DATE) or r.EXPIRE_DATE <= signal_date + pd.DateOffset(years=C.MIN_EXPIRE_YEARS):
             continue
-        # 规模过滤: MIN_REMAIN_SCALE>0 时用剩余规模(发行规模×(1-累计转股比例asof), 无时间轴→转股比例0);
-        # MIN_REMAIN_SCALE=0 时回退为发行规模下限(转股数据不完整时保证两市规则对称)
+        # 剩余规模 = 发行规模 × (1 - 累计转股比例asof); 无时间轴 → 转股比例0 → 剩余=发行规模
         if not np.isfinite(r.ACTUAL_ISSUE_SCALE):
             continue
-        if C.MIN_REMAIN_SCALE > 0:
-            cr = min(conv_rate_at(conv_timelines.get(code), signal_date), 100.0)
-            remain = r.ACTUAL_ISSUE_SCALE * (1.0 - cr / 100.0)
-            if remain < C.MIN_REMAIN_SCALE:
-                continue  # 剩余规模不足
-        elif r.ACTUAL_ISSUE_SCALE < C.MIN_ISSUE_SCALE:
-            continue  # 发行规模不足(回退口径)
+        cr = min(conv_rate_at(conv_timelines.get(code), signal_date), 100.0)
+        remain = r.ACTUAL_ISSUE_SCALE * (1.0 - cr / 100.0)
+        if remain < C.MIN_REMAIN_SCALE:
+            continue  # 剩余规模不足
         if rating_eligibility is None:
             # 回退旧行为: 最新快照精确匹配(有前视偏差, 启动时已告警)
             rating = str(r.RATING).strip() if pd.notna(r.RATING) else ""
@@ -430,11 +426,8 @@ def compute_rank(store, uni, signal_date, deadlines, tp_timelines, holdings=froz
         if (C.TAKE_PROFIT_ON and held and close > C.MAX_PRICE
                 and premium > C.TP_PROFIT_PREMIUM):
             continue  # 溢价泡沫化, 止盈
-        dl_val = close + premium * 100.0
-        if C.MAX_DOUBLE_LOW > 0 and dl_val > C.MAX_DOUBLE_LOW:
-            continue  # 双低值超天花板, 宁可持现金(在持券随之跌出候选被卖出)
         rows.append({"code": code, "close": close, "premium": premium,
-                     "double_low": dl_val})
+                     "double_low": close + premium * 100.0})
     if not rows:
         return pd.DataFrame(columns=["code", "close", "premium", "double_low", "rank"])
     df = pd.DataFrame(rows).sort_values("double_low").reset_index(drop=True)
@@ -653,28 +646,7 @@ def main():
     ap.add_argument("--exec", dest="exec_mode", default="next_open",
                     choices=["next_open", "same_close", "same_vwap"],
                     help="执行模式: next_open=次日开盘(默认), same_close=当日收盘, same_vwap=当日均价代理")
-    ap.add_argument("--max-dl", type=float, default=None,
-                    help="双低值天花板(覆盖 config.MAX_DOUBLE_LOW), 如 160; 0=关闭")
-    ap.add_argument("--hold-max", type=float, default=None,
-                    help="持仓价格上限(覆盖 config.HOLD_MAX_PRICE)")
-    ap.add_argument("--tp-prem", type=float, default=None,
-                    help="止盈溢价率(覆盖 config.TP_PROFIT_PREMIUM), 如 0.3")
-    ap.add_argument("--tag", default="", help="输出文件名后缀标记(网格实验用)")
-    ap.add_argument("--min-remain", type=float, default=None,
-                    help="剩余规模下限(覆盖 config.MIN_REMAIN_SCALE), 0=关闭该过滤")
-    ap.add_argument("--tp-on", action="store_true", help="强制打开止盈线(覆盖 config.TAKE_PROFIT_ON)")
     args = ap.parse_args()
-
-    if args.max_dl is not None:
-        C.MAX_DOUBLE_LOW = args.max_dl
-    if args.hold_max is not None:
-        C.HOLD_MAX_PRICE = args.hold_max
-    if args.tp_prem is not None:
-        C.TP_PROFIT_PREMIUM = args.tp_prem
-    if args.min_remain is not None:
-        C.MIN_REMAIN_SCALE = args.min_remain
-    if args.tp_on:
-        C.TAKE_PROFIT_ON = True
 
     start_date = pd.Timestamp(args.start)
     end_date = pd.Timestamp(args.end) if args.end else None
@@ -689,11 +661,9 @@ def main():
 
     os.makedirs(C.OUTPUT_DIR, exist_ok=True)
     suffix = "" if args.exec_mode == "next_open" else f"_{args.exec_mode}"
-    suffix += args.tag
     summaries = []
     for n in [int(x) for x in args.n.split(",")]:
-        print(f"\n===== 回测 N={n} exec={args.exec_mode} tag={args.tag} "
-              f"max_dl={C.MAX_DOUBLE_LOW} hold_max={C.HOLD_MAX_PRICE} tp_prem={C.TP_PROFIT_PREMIUM} =====")
+        print(f"\n===== 回测 N={n} exec={args.exec_mode} =====")
         equity, trades = run_backtest(uni, store, bench, n, start_date, end_date,
                                       exec_mode=args.exec_mode)
         if equity.empty:
