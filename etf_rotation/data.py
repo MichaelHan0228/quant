@@ -25,6 +25,34 @@ ETF_POOL = {
     "512400": ("sh512400", "有色金属ETF"),
     "159992": ("sz159992", "创新药ETF"),
     "511260": ("sh511260", "十年国债ETF"),
+    "501018": ("sh501018", "南方原油LOF"),
+    # 宽基（扩池实验）
+    "510050": ("sh510050", "上证50ETF"),
+    "510300": ("sh510300", "沪深300ETF"),
+    "510500": ("sh510500", "中证500ETF"),
+    "512100": ("sh512100", "中证1000ETF"),
+    "563300": ("sh563300", "中证2000ETF"),
+    "588000": ("sh588000", "科创50ETF"),
+    # 申万一级行业代表ETF（行业轮动实验池）
+    "512800": ("sh512800", "银行ETF"),
+    "512880": ("sh512880", "证券ETF"),
+    "512690": ("sh512690", "酒ETF"),
+    "512010": ("sh512010", "医药ETF"),
+    "512480": ("sh512480", "半导体ETF"),
+    "512720": ("sh512720", "计算机ETF"),
+    "515790": ("sh515790", "光伏ETF"),
+    "516110": ("sh516110", "汽车ETF"),
+    "515220": ("sh515220", "煤炭ETF"),
+    "515210": ("sh515210", "钢铁ETF"),
+    "512200": ("sh512200", "房地产ETF"),
+    "512660": ("sh512660", "军工ETF"),
+    "512980": ("sh512980", "传媒ETF"),
+    "515880": ("sh515880", "通信ETF"),
+    "159996": ("sz159996", "家电ETF"),
+    "159825": ("sz159825", "农业ETF"),
+    "159611": ("sz159611", "电力ETF"),
+    "159870": ("sz159870", "化工ETF"),
+    "159928": ("sz159928", "消费ETF"),
 }
 
 # 默认回测池（文章原版4只），国债ETF需通过 --codes 显式加入
@@ -38,10 +66,18 @@ def _fetch_chunk(tencent_code: str, start: str, end: str, count: int = 640) -> l
         "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?"
         f"param={tencent_code},day,{start},{end},{count},qfq"
     )
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    raw = urllib.request.urlopen(req, timeout=15).read().decode()
-    node = json.loads(raw)["data"][tencent_code]
-    return node.get("qfqday") or node.get("day") or []
+    # 腾讯偶发 5xx/连接重置（短时限流），重试 3 次带退避
+    last_err = None
+    for attempt in range(3):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            raw = urllib.request.urlopen(req, timeout=15).read().decode()
+            node = json.loads(raw)["data"][tencent_code]
+            return node.get("qfqday") or node.get("day") or []
+        except Exception as e:
+            last_err = e
+            time.sleep(1.5 * (attempt + 1))
+    raise last_err
 
 
 def _fetch_remote(code: str, start: str) -> pd.DataFrame:

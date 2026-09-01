@@ -25,6 +25,61 @@ def _need_switch(best: str, best_score: float, holding: str, hold_score: float,
     return best_score > hold_score + margin
 
 
+def _platform_series(close: pd.Series, volume: pd.Series, params: Params) -> pd.Series:
+    """逐日计算平台位（只用 T 日及之前数据，无前视）。
+
+    swing:      最近 anchor_n 天最低点=当前波段起点，起点前 box_n 天为箱体，
+                箱体高度超 platform_max_h 视为无平台（NaN）；位 = 箱底+q×箱高。
+    prevhigh:   同样锚定起点，位 = 起点前 ph_n 天最高收盘（前高），无高度上限。
+    volprofile: 最近 vp_n 天按收盘价分桶、按成交量加权，取当前价下方
+                成交量最大的桶（POC）中点为平台位；当前价下方无量则 NaN。
+    """
+    mode = params.platform_mode
+    n = len(close)
+    vals = np.full(n, np.nan)
+    c = close.values
+    v = volume.values if volume is not None else None
+    A = params.platform_anchor_n
+    for t in range(n):
+        if t < A + 20:
+            continue
+        if mode in ("swing", "prevhigh"):
+            win = c[t - A + 1:t + 1]
+            if np.isnan(win).any():
+                continue
+            leg = t - A + 1 + int(np.argmin(win))  # 波段起点（窗口内最低价）
+            lo = max(0, leg - (params.platform_box_n if mode == "swing"
+                               else params.platform_ph_n))
+            box = c[lo:leg]
+            box = box[~np.isnan(box)]
+            if len(box) < 20:
+                continue
+            hi, lo_ = float(box.max()), float(box.min())
+            if mode == "swing":
+                if hi / lo_ - 1 > params.platform_max_h:
+                    continue  # 箱体太宽=不是平台
+                vals[t] = lo_ + params.platform_q * (hi - lo_)
+            else:
+                vals[t] = hi
+        elif mode == "volprofile":
+            wc = c[t - params.platform_vp_n + 1:t + 1]
+            wv = v[t - params.platform_vp_n + 1:t + 1]
+            mask = ~np.isnan(wc) & ~np.isnan(wv)
+            wc, wv = wc[mask], wv[mask]
+            if len(wc) < 40 or wc.max() <= wc.min():
+                continue
+            bins = np.linspace(wc.min(), wc.max(), params.platform_vp_bins + 1)
+            hist = np.zeros(params.platform_vp_bins)
+            idx = np.clip(np.digitize(wc, bins) - 1, 0, len(hist) - 1)
+            np.add.at(hist, idx, wv)
+            below = bins[:-1] < c[t]          # 当前价下方的桶
+            if not below.any() or hist[below].sum() <= 0:
+                continue
+            poc = int(np.argmax(np.where(below, hist, -1)))
+            vals[t] = (bins[poc] + bins[poc + 1]) / 2
+    return pd.Series(vals, index=close.index)
+
+
 def _target_weights(row: pd.Series, holdings: dict, ma_ok: dict,
                     params: Params, exclude: set = None) -> dict:
     """根据当日评分和过滤规则，计算目标持仓 {code: weight}（等权 1/top_k，余为现金）。
@@ -120,6 +175,12 @@ def run_backtest(scores: pd.DataFrame, panel: dict, params: Params,
             # EMA 平滑（半衰期 vol_smooth 个交易日），降低目标权重的日度跳动
             vols = vols.ewm(halflife=params.vol_smooth).mean()
 
+    platforms = None
+    if params.platform_mode != "none":
+        platforms = {c: _platform_series(closes[c], df["volume"].reindex(dates),
+                                         params)
+                     for c, df in panel.items()}
+
     # 当日可选标的 ≥2 才构成有效轮动池（z-score 至少需要2个样本）
     valid = scores.index[scores.notna().sum(axis=1) >= 2]
     start_pos = max(dates.searchsorted(start), dates.searchsorted(valid[0]) + 1)
@@ -132,6 +193,7 @@ def run_backtest(scores: pd.DataFrame, panel: dict, params: Params,
     round_trips = []
     pending = None
     peaks = {}            # code -> 持仓期最高收盘（移动止损用）
+    entry_px = {}         # code -> 建仓开盘价（浮盈收紧止损用）
     banned = {}           # code -> 冷却截止的日期下标
 
     for i in range(start_pos, len(dates)):
@@ -153,10 +215,12 @@ def run_backtest(scores: pd.DataFrame, panel: dict, params: Params,
                         trades.append((d, "买入", c, opens.at[d, c], new, nav))
                         entry_nav[c] = nav
                         peaks[c] = opens.at[d, c]
+                        entry_px[c] = opens.at[d, c]
                     elif old > new:
                         trades.append((d, "卖出", c, opens.at[d, c], old, nav))
                         if new == 0:
                             peaks.pop(c, None)
+                            entry_px.pop(c, None)
                             if c in entry_nav:
                                 round_trips.append(nav / entry_nav.pop(c) - 1)
                 holdings = pending
@@ -169,13 +233,28 @@ def run_backtest(scores: pd.DataFrame, panel: dict, params: Params,
         cash_idx.append(1 - sum(holdings.values()))
         # ---- 收盘：移动止损检查（触发则次日开盘清仓并进入冷却）----
         stopped = set()
-        if params.stop_pct > 0 or params.atr_mult > 0 or params.atr_mult_map:
+        if (params.stop_pct > 0 or params.atr_mult > 0
+                or params.atr_mult_map or platforms is not None):
             for c in holdings:
                 peaks[c] = max(peaks.get(c, closes.at[d, c]), closes.at[d, c])
                 hit = False
-                if params.stop_pct > 0 and \
-                        closes.at[d, c] < peaks[c] * (1 - params.stop_pct):
-                    hit = True
+                in_profit = params.profit_trigger > 0 and c in entry_px and \
+                    peaks[c] / entry_px[c] - 1 >= params.profit_trigger
+                # 浮盈收紧止损：峰值收益 ≥ profit_trigger 后改用 profit_stop 止损线
+                stop_c = params.profit_stop if in_profit else params.stop_pct
+                lines = []
+                if stop_c > 0:
+                    lines.append(peaks[c] * (1 - stop_c))
+                if platforms is not None:
+                    lv = platforms[c].iat[i]
+                    if not pd.isna(lv):
+                        lines.append(lv)
+                if lines:
+                    # 浮盈头寸：较低线生效（两线皆破才止损，平台不破可容忍洗盘）；
+                    # 亏损头寸：较高线生效（平台破位立即止损，不等百分比线）
+                    thr = min(lines) if in_profit else max(lines)
+                    if closes.at[d, c] < thr:
+                        hit = True
                 mult = (params.atr_mult_map or {}).get(c, params.atr_mult)
                 if mult > 0:
                     a = atr.at[d, c]

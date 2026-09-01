@@ -1,4 +1,4 @@
-"""入口（默认配置 = 5池 Top2等权 + 止损10% + 阈值1.5 + 窗口25）：
+"""入口（默认配置 = 6池 Top2等权 + 止损13% + 浮盈收紧20%→8% + 阈值1.5 + 窗口25）：
   python run.py backtest [选项]            # 回测（2019至今），输出报告
   python run.py sweep                      # 参数遍历（固定网格）
   python run.py signal [持仓代码] [选项]    # 今日信号：评分排名 + 是否应调仓
@@ -8,12 +8,14 @@
   --cash-rule RULE   none(默认) / score / ma / ma_strict
   --ma-n N           cash-rule 含 ma 时的均线窗口（默认 25）
   --stop PCT         固定移动止损比例（默认 0.13，0=关闭；只卖破位标的，不连坐）
+  --profit-lock A,B  浮盈收紧止损（默认 0.20,0.08：峰值浮盈≥20%后止损线收紧为8%）
+  --platform MODE    平台止损（默认 none；swing/prevhigh/volprofile 三方案实验后均弃用）
   --atr MULT         ATR止损倍数：峰值-MULT×ATR(14)（默认 0 关闭；k=1 建议 3.0）
   --atr-n N          ATR 窗口（默认 14）
   --threshold T      调仓阈值（默认 1.5）
-  --weights A,B,C    三因子权重（默认 0.3,0.3,0.4）
+  --weights A,B,C    三因子权重（默认 0.3,0.3,0.4；4个值时追加量能因子）
   --window N         三因子统一窗口（默认 25）
-  --codes C1,C2,...  标的池（默认 512890,159949,513100,518880,159985）
+  --codes C1,C2,...  标的池（默认 512890,159949,513100,518880,159985,511260）
 
 示例：
   python run.py backtest                          # 默认最优配置
@@ -60,9 +62,18 @@ def _parse_args(argv):
                    help="再平衡带（如 0.05：权重偏离≤5pp不交易）；0=关闭")
     p.add_argument("--weights", default="0.3,0.3,0.4",
                    help="因子权重：3个值=乖离/斜率/效率；4个值=追加量能(如 0.25,0.25,0.3,0.2)")
+    p.add_argument("--mom-vol-pen", type=float, default=0.0,
+                   help="低波惩罚系数：总分 - pen×z(25日波动率)，如 0.3（默认 0 关闭）")
+    p.add_argument("--profit-lock", default="0.20,0.08",
+                   help="浮盈收紧止损 '触发收益,收紧止损'（默认 0.20,0.08；0,0=关闭）")
+    p.add_argument("--platform", default="none",
+                   choices=["none", "swing", "prevhigh", "volprofile"],
+                   help="平台止损：swing=波段锚定箱体/prevhigh=前高/volprofile=筹码分布（实验后均弃用，默认 none）")
+    p.add_argument("--platform-q", type=float, default=0.5,
+                   help="swing 箱体内止损位置：0=箱底 0.5=中部 1=箱顶")
     p.add_argument("--window", type=int, default=25)
-    p.add_argument("--codes", default="512890,159949,513100,518880,159985",
-                   help="逗号分隔标的池，默认4只原版+豆粕")
+    p.add_argument("--codes", default="512890,159949,513100,518880,159985,511260",
+                   help="逗号分隔标的池，默认6只跨资产池（含十年国债）")
     p.add_argument("--start", default="2019-01-01",
                    help="回测起点（动态池：标的未上市则当年不参与轮动）")
     return p.parse_args(argv)
@@ -71,6 +82,9 @@ def _parse_args(argv):
 def _params_from(args) -> Params:
     weights = tuple(float(x) for x in args.weights.split(","))
     assert len(weights) in (3, 4), "--weights 需要3或4个值，如 0.3,0.3,0.4 或 0.25,0.25,0.3,0.2"
+    profit_trigger, profit_stop = 0.0, 0.08
+    if args.profit_lock:
+        profit_trigger, profit_stop = (float(x) for x in args.profit_lock.split(","))
     return Params.with_window(
         args.window, weights=weights, threshold=args.threshold,
         top_k=args.top_k, cash_rule=args.cash_rule, ma_n=args.ma_n,
@@ -78,7 +92,9 @@ def _params_from(args) -> Params:
         stop_sell_all=False, threshold_exit=args.threshold_exit,
         vol_n=args.vol_wt, stop_cd=args.stop_cd,
         weight_mode=args.weight_mode, vol_smooth=args.vol_smooth,
-        reb_band=args.reb_band)
+        reb_band=args.reb_band, mom_vol_pen=args.mom_vol_pen,
+        profit_trigger=profit_trigger, profit_stop=profit_stop,
+        platform_mode=args.platform, platform_q=args.platform_q)
 
 
 def _panel_and_scores(params: Params, codes: list = None):
@@ -88,7 +104,8 @@ def _panel_and_scores(params: Params, codes: list = None):
         union = df.index if union is None else union.union(df.index)
     dates = union.sort_values()
     fm = factor_matrices(panel, dates, params)
-    return panel, dates, composite_scores(fm, params.weights)
+    return panel, dates, composite_scores(fm, params.weights,
+                                          vol_pen=params.mom_vol_pen)
 
 
 def cmd_backtest(args):

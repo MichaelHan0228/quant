@@ -41,6 +41,21 @@ class Params:
                               # 则不交易(0=关闭，每日精确跟踪目标权重)
     vol_short: int = 5        # 量能因子短期均量窗口
     vol_long: int = 25        # 量能因子长期均量窗口（weights 传 4 个值时启用）
+    mom_vol_pen: float = 0.0  # 低波惩罚：总分 - pen × z(波动率)，0=关闭
+    mom_vol_n: int = 25       # 低波惩罚的波动率窗口（日收益率std）
+    profit_trigger: float = 0.0  # 浮盈收紧止损：峰值收益 ≥ 该值后启用（0=关闭）
+    profit_stop: float = 0.08    # 浮盈收紧后的止损线（替换 stop_pct）
+    # ── 平台止损（箱体/前高/筹码分布）──
+    # 触发规则：浮盈头寸 = 百分比线与平台线都破才止损（较低者生效，宽松）；
+    #           亏损头寸 = 任一线破即止损（较高者生效，严格）。平台无效时回退百分比线。
+    platform_mode: str = "none"  # none / swing(波段锚定箱体) / prevhigh(前高) / volprofile(筹码分布)
+    platform_q: float = 0.5      # 箱体内止损位置：0=箱底 0.5=中部 1=箱顶
+    platform_anchor_n: int = 60  # 波段起点搜索窗口（最近N天最低点=当前段起点）
+    platform_box_n: int = 60     # 箱体窗口（起点之前N天）
+    platform_max_h: float = 0.30  # 箱体高度上限，超过视为无平台（回退百分比止损）
+    platform_ph_n: int = 120     # prevhigh：波段起点之前的回望窗口
+    platform_vp_n: int = 120     # volprofile：筹码分布窗口
+    platform_vp_bins: int = 30   # volprofile：价格分桶数
 
     @classmethod
     def with_window(cls, window: int, **kw):
@@ -93,17 +108,20 @@ def factor_matrices(panel: dict, dates: pd.Index, params: Params) -> pd.DataFram
     因子值只依赖窗口参数，不依赖权重/阈值，参数遍历时可复用。
     """
     warmup = max(params.bias_n, params.slope_n, params.momentum_day,
-                 params.eff_n, params.vol_long)
+                 params.eff_n, params.vol_long,
+                 params.mom_vol_n if params.mom_vol_pen > 0 else 0)
     with_vol = len(params.weights) >= 4  # weights 传 4 个值时启用量能因子
+    with_lv = params.mom_vol_pen > 0     # 低波惩罚：需波动率因子列
     cols = {}
     for code, df in panel.items():
         df = df.reindex(dates)
         close = df["close"]
         valid_cnt = close.notna().cumsum()  # 截至当日的自身有效K线数
-        b, s, e, v = [], [], [], []
+        b, s, e, v, lv = [], [], [], [], []
         for i in range(len(dates)):
             if valid_cnt.iloc[i] < warmup:
-                b.append(np.nan); s.append(np.nan); e.append(np.nan); v.append(np.nan)
+                b.append(np.nan); s.append(np.nan); e.append(np.nan)
+                v.append(np.nan); lv.append(np.nan)
                 continue
             win_close = close.iloc[:i + 1].dropna()
             win_df = df.iloc[:i + 1].dropna(subset=["close"])
@@ -113,23 +131,29 @@ def factor_matrices(panel: dict, dates: pd.Index, params: Params) -> pd.DataFram
             if with_vol:
                 v.append(volume_momentum(win_df["volume"],
                                          params.vol_short, params.vol_long))
-            else:
-                v.append(np.nan)
+            if with_lv:
+                # 已实现波动率：最近 mom_vol_n 日收益率 std（z-score 时横截面标准化）
+                lv.append(float(win_close.pct_change()
+                                .iloc[-params.mom_vol_n:].std()))
         cols[("bias", code)] = b
         cols[("slope", code)] = s
         cols[("eff", code)] = e
         if with_vol:
             cols[("volr", code)] = v
+        if with_lv:
+            cols[("lowvol", code)] = lv
     out = pd.DataFrame(cols, index=dates)
     out.columns = pd.MultiIndex.from_tuples(out.columns)
     return out
 
 
-def composite_scores(factors: pd.DataFrame, weights: tuple) -> pd.DataFrame:
+def composite_scores(factors: pd.DataFrame, weights: tuple,
+                     vol_pen: float = 0.0) -> pd.DataFrame:
     """横截面 Z-Score 标准化后加权，返回 index=date, columns=code 的总分矩阵。
 
     未上市标的的 NaN 不参与标准化（mean/std 均 skipna），得分保留 NaN，
     选标的时视为不在池内。std=0（当日可选标的同分）时该因子得分置 0。
+    vol_pen > 0 时额外减去 z(波动率) × vol_pen（低波惩罚：同动量下偏好波动小的）。
     """
     names = ["bias", "slope", "eff", "volr"][:len(weights)]
     z = {}
@@ -140,4 +164,11 @@ def composite_scores(factors: pd.DataFrame, weights: tuple) -> pd.DataFrame:
         # std==0（或该因子当日无法标准化）的已有值置 0；未上市的 NaN 保留 NaN
         zfac = zfac.fillna(0.0).where(f.notna(), other=np.nan)
         z[fac] = zfac * w
-    return sum(z[fac] for fac in names)
+    total = sum(z[fac] for fac in names)
+    if vol_pen > 0:
+        f = factors["lowvol"]
+        std = f.std(axis=1).replace(0, np.nan)
+        zfac = f.sub(f.mean(axis=1), axis=0).div(std, axis=0)
+        zfac = zfac.fillna(0.0).where(f.notna(), other=np.nan)
+        total = total - zfac * vol_pen
+    return total
