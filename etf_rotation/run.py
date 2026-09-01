@@ -1,4 +1,4 @@
-"""入口（默认配置 = 6池 Top2等权 + 止损13% + 浮盈收紧20%→8% + 阈值1.5 + 窗口25）：
+"""入口（默认配置 = 6池 Top2等权 + 止损13% + 浮盈收紧20%→8% + 波动率目标20% + 阈值1.5 + 窗口25）：
   python run.py backtest [选项]            # 回测（2019至今），输出报告
   python run.py sweep                      # 参数遍历（固定网格）
   python run.py signal [持仓代码] [选项]    # 今日信号：评分排名 + 是否应调仓
@@ -71,6 +71,14 @@ def _parse_args(argv):
                    help="平台止损：swing=波段锚定箱体/prevhigh=前高/volprofile=筹码分布（实验后均弃用，默认 none）")
     p.add_argument("--platform-q", type=float, default=0.5,
                    help="swing 箱体内止损位置：0=箱底 0.5=中部 1=箱顶")
+    p.add_argument("--vol-target", type=float, default=0.20,
+                   help="组合年化目标波动率（默认 0.20），超出按0.25步进降仓留现金；0=关闭")
+    p.add_argument("--vol-target-n", type=int, default=20,
+                   help="波动率回望窗口（默认 20 个交易日）")
+    p.add_argument("--premium-limit", type=float, default=0.0,
+                   help="QDII 溢价率上限（如 0.03），超限禁新买；需先跑 fetch_premium.py")
+    p.add_argument("--commission", type=float, default=0.0001,
+                   help="单边综合成本（佣金+滑点，默认万1；滑点敏感性测试调它）")
     p.add_argument("--window", type=int, default=25)
     p.add_argument("--codes", default="512890,159949,513100,518880,159985,511260",
                    help="逗号分隔标的池，默认6只跨资产池（含十年国债）")
@@ -94,7 +102,9 @@ def _params_from(args) -> Params:
         weight_mode=args.weight_mode, vol_smooth=args.vol_smooth,
         reb_band=args.reb_band, mom_vol_pen=args.mom_vol_pen,
         profit_trigger=profit_trigger, profit_stop=profit_stop,
-        platform_mode=args.platform, platform_q=args.platform_q)
+        platform_mode=args.platform, platform_q=args.platform_q,
+        vol_target=args.vol_target, vol_target_n=args.vol_target_n,
+        premium_limit=args.premium_limit, commission=args.commission)
 
 
 def _panel_and_scores(params: Params, codes: list = None):

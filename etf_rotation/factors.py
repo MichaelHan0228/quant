@@ -56,6 +56,11 @@ class Params:
     platform_ph_n: int = 120     # prevhigh：波段起点之前的回望窗口
     platform_vp_n: int = 120     # volprofile：筹码分布窗口
     platform_vp_bins: int = 30   # volprofile：价格分桶数
+    # ── 组合波动率目标 ──
+    vol_target: float = 0.0   # 组合年化目标波动率（如 0.20），超出则按比例降仓留现金；0=关闭
+    vol_target_n: int = 20    # 实现波动率回望窗口（策略自身日收益 std）
+    # ── QDII 溢价过滤 ──
+    premium_limit: float = 0.0  # QDII 溢价率上限（如 0.03），超限禁止新买入（不强卖持仓）；0=关闭
 
     @classmethod
     def with_window(cls, window: int, **kw):

@@ -13,6 +13,7 @@ k>1 时同理：挑战者须超过最弱持仓该边际才能挤入。
 """
 import numpy as np
 import pandas as pd
+from pathlib import Path
 
 from factors import Params
 
@@ -81,13 +82,16 @@ def _platform_series(close: pd.Series, volume: pd.Series, params: Params) -> pd.
 
 
 def _target_weights(row: pd.Series, holdings: dict, ma_ok: dict,
-                    params: Params, exclude: set = None) -> dict:
+                    params: Params, exclude: set = None,
+                    no_buy: set = None) -> dict:
     """根据当日评分和过滤规则，计算目标持仓 {code: weight}（等权 1/top_k，余为现金）。
 
     row 中 NaN（标的未上市/无数据）视为不在池内，直接剔除。
+    no_buy 中的标的禁止作为新挑战者买入，但已有持仓保留（用于 QDII 溢价过滤）。
     """
     rule = params.cash_rule
     exclude = exclude or set()
+    no_buy = no_buy or set()
     row = row.dropna()
     if rule == "none":
         passed = dict(row)
@@ -105,7 +109,7 @@ def _target_weights(row: pd.Series, holdings: dict, ma_ok: dict,
 
     k = params.top_k
     survivors = [c for c in holdings if c in passed]
-    cands = sorted((c for c in passed if c not in survivors),
+    cands = sorted((c for c in passed if c not in survivors and c not in no_buy),
                    key=lambda c: -passed[c])
     if params.threshold_exit is None:
         # 原版单一阈值：先填空位（无需阈值：没有挤压任何持仓）
@@ -180,6 +184,17 @@ def run_backtest(scores: pd.DataFrame, panel: dict, params: Params,
         platforms = {c: _platform_series(closes[c], df["volume"].reindex(dates),
                                          params)
                      for c, df in panel.items()}
+    premium = None
+    if params.premium_limit > 0:
+        # QDII 溢价率序列（data/{code}_premium.csv，由 fetch_premium.py 生成）
+        pcols = {}
+        for c in panel:
+            f = Path(__file__).parent / "data" / f"{c}_premium.csv"
+            if f.exists():
+                pcols[c] = pd.read_csv(f, dtype={"date": str},
+                                       index_col="date")["premium"]
+        if pcols:
+            premium = pd.DataFrame(pcols).reindex(dates).ffill()
 
     # 当日可选标的 ≥2 才构成有效轮动池（z-score 至少需要2个样本）
     valid = scores.index[scores.notna().sum(axis=1) >= 2]
@@ -278,7 +293,27 @@ def run_backtest(scores: pd.DataFrame, panel: dict, params: Params,
                 ma_row = ({c: bool(ma_ok.at[d, c]) for c in row.index}
                           if ma_ok is not None else {})
                 exclude = {c for c, until in banned.items() if i < until}
-                pending = _target_weights(row, holdings, ma_row, params, exclude)
+                no_buy = set()
+                if premium is not None:
+                    # 溢价超限的 QDII 禁止新买入（持仓不强卖，等溢价回落）
+                    no_buy = {c for c in row.index
+                              if c in premium.columns
+                              and not pd.isna(premium[c].iat[i])
+                              and premium[c].iat[i] > params.premium_limit}
+                pending = _target_weights(row, holdings, ma_row, params,
+                                          exclude, no_buy)
+                if params.vol_target > 0 and pending:
+                    # 组合波动率目标：策略自身近 N 日日收益年化波动超目标则按比例降仓，
+                    # 0.25 步进量化防每日抖动；只用到 T-1 日及之前的净值，无前视
+                    ex = 1.0
+                    if len(nav_val) > params.vol_target_n:
+                        r = (pd.Series(nav_val).pct_change().dropna()
+                             .iloc[-params.vol_target_n:])
+                        realized = float(r.std()) * np.sqrt(252)
+                        if realized > 0:
+                            ex = min(1.0, params.vol_target / realized)
+                    ex = round(ex * 4) / 4.0
+                    pending = {c: w * ex for c, w in pending.items()}
                 if (params.weight_mode != "equal"
                         and set(pending) == set(holdings)):
                     # 成分不变：权重随价格漂移，不做每日再平衡（防换手爆炸）
