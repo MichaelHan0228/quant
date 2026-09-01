@@ -7,7 +7,7 @@
   --top-k N          持仓评分前 N 名等权（默认 2）
   --cash-rule RULE   none(默认) / score / ma / ma_strict
   --ma-n N           cash-rule 含 ma 时的均线窗口（默认 25）
-  --stop PCT         固定移动止损比例（默认 0.10，0=关闭）
+  --stop PCT         固定移动止损比例（默认 0.13，0=关闭；只卖破位标的，不连坐）
   --atr MULT         ATR止损倍数：峰值-MULT×ATR(14)（默认 0 关闭；k=1 建议 3.0）
   --atr-n N          ATR 窗口（默认 14）
   --threshold T      调仓阈值（默认 1.5）
@@ -42,10 +42,22 @@ def _parse_args(argv):
     p.add_argument("--cash-rule", default="none",
                    choices=["none", "score", "ma", "ma_strict"])
     p.add_argument("--ma-n", type=int, default=25)
-    p.add_argument("--stop", type=float, default=0.10)
+    p.add_argument("--stop", type=float, default=0.13)
     p.add_argument("--atr", type=float, default=0.0)
     p.add_argument("--atr-n", type=int, default=14)
     p.add_argument("--threshold", type=float, default=1.5)
+    p.add_argument("--threshold-exit", type=float, default=None,
+                   help="换出阈值（宜低于换入；不传则与 --threshold 相同走原版逻辑）")
+    p.add_argument("--vol-wt", type=int, default=0,
+                   help="逆波动率加权窗口（如 25；0=关闭，等权）")
+    p.add_argument("--stop-cd", type=int, default=5,
+                   help="止损后冷却交易日数（默认 5）")
+    p.add_argument("--weight-mode", default="equal", choices=["equal", "score"],
+                   help="equal=等权(默认) / score=换仓时按分数定权重，之后漂移")
+    p.add_argument("--vol-smooth", type=int, default=0,
+                   help="波动率EMA平滑半衰期(交易日)，如 10；0=不平滑")
+    p.add_argument("--reb-band", type=float, default=0.0,
+                   help="再平衡带（如 0.05：权重偏离≤5pp不交易）；0=关闭")
     p.add_argument("--weights", default="0.3,0.3,0.4")
     p.add_argument("--window", type=int, default=25)
     p.add_argument("--codes", default="512890,159949,513100,518880,159985",
@@ -61,7 +73,11 @@ def _params_from(args) -> Params:
     return Params.with_window(
         args.window, weights=weights, threshold=args.threshold,
         top_k=args.top_k, cash_rule=args.cash_rule, ma_n=args.ma_n,
-        stop_pct=args.stop, atr_mult=args.atr, atr_n=args.atr_n)
+        stop_pct=args.stop, atr_mult=args.atr, atr_n=args.atr_n,
+        stop_sell_all=False, threshold_exit=args.threshold_exit,
+        vol_n=args.vol_wt, stop_cd=args.stop_cd,
+        weight_mode=args.weight_mode, vol_smooth=args.vol_smooth,
+        reb_band=args.reb_band)
 
 
 def _panel_and_scores(params: Params, codes: list = None):

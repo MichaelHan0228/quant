@@ -52,18 +52,43 @@ def _target_weights(row: pd.Series, holdings: dict, ma_ok: dict,
     survivors = [c for c in holdings if c in passed]
     cands = sorted((c for c in passed if c not in survivors),
                    key=lambda c: -passed[c])
-    # 先填空位（无需阈值：没有挤压任何持仓）
-    while len(survivors) < k and cands:
-        survivors.append(cands.pop(0))
-    # 位置已满：挑战者须超过最弱持仓 + 阈值边际才能挤入
-    while cands and survivors:
-        weakest = min(survivors, key=lambda c: row[c])
-        if _need_switch(cands[0], row[cands[0]], weakest, row[weakest],
-                        params.threshold):
-            survivors.remove(weakest)
+    if params.threshold_exit is None:
+        # 原版单一阈值：先填空位（无需阈值：没有挤压任何持仓）
+        while len(survivors) < k and cands:
             survivors.append(cands.pop(0))
-        else:
-            break
+        # 位置已满：挑战者须超过最弱持仓 + 阈值边际才能挤入
+        while cands and survivors:
+            weakest = min(survivors, key=lambda c: row[c])
+            if _need_switch(cands[0], row[cands[0]], weakest, row[weakest],
+                            params.threshold):
+                survivors.remove(weakest)
+                survivors.append(cands.pop(0))
+            else:
+                break
+    else:
+        # 非对称阈值：换出松（最强挑战者超过在持者+exit边际即踢出），
+        # 换入严（候选须超过最弱在持者+enter边际才补位，否则留现金）
+        te, tn = params.threshold_exit, params.threshold
+        if survivors and cands:
+            best_c = cands[0]
+            survivors = [h for h in survivors
+                         if not _need_switch(best_c, row[best_c], h, row[h], te)]
+        while len(survivors) < k and cands:
+            if not survivors:  # 全部空仓时直接取最强候选
+                survivors.append(cands.pop(0))
+                continue
+            weakest = min(survivors, key=lambda c: row[c])
+            if _need_switch(cands[0], row[cands[0]], weakest, row[weakest], tn):
+                survivors.append(cands.pop(0))
+            else:
+                break
+    if params.weight_mode == "score":
+        # 分数加权：负分截断为 0（该标的让位给现金），总仓位 = len/k 不变
+        clipped = {c: max(row[c], 0.0) for c in survivors}
+        tot = sum(clipped.values())
+        scale = len(survivors) / k
+        if tot > 0:
+            return {c: clipped[c] / tot * scale for c in survivors}
     w = 1.0 / k
     return {c: w for c in survivors}
 
@@ -87,6 +112,13 @@ def run_backtest(scores: pd.DataFrame, panel: dict, params: Params,
         tr = pd.concat([highs - lows, (highs - closes.shift()).abs(),
                         (lows - closes.shift()).abs()]).groupby(level=0).max()
         atr = tr.ewm(alpha=1 / params.atr_n, min_periods=params.atr_n).mean()
+    vols = None
+    if params.vol_n > 0:
+        # 逆波动率加权：T日及之前 vol_n 个交易日的日收益率标准差（无前视）
+        vols = closes.pct_change().rolling(params.vol_n).std()
+        if params.vol_smooth > 0:
+            # EMA 平滑（半衰期 vol_smooth 个交易日），降低目标权重的日度跳动
+            vols = vols.ewm(halflife=params.vol_smooth).mean()
 
     # 当日可选标的 ≥2 才构成有效轮动池（z-score 至少需要2个样本）
     valid = scores.index[scores.notna().sum(axis=1) >= 2]
@@ -168,6 +200,25 @@ def run_backtest(scores: pd.DataFrame, panel: dict, params: Params,
                           if ma_ok is not None else {})
                 exclude = {c for c, until in banned.items() if i < until}
                 pending = _target_weights(row, holdings, ma_row, params, exclude)
+                if (params.weight_mode != "equal"
+                        and set(pending) == set(holdings)):
+                    # 成分不变：权重随价格漂移，不做每日再平衡（防换手爆炸）
+                    pending = holdings
+                if vols is not None and len(pending) >= 2:
+                    # 逆波动率加权：权重 ∝ 1/vol，总仓位不变，余下仍为现金；
+                    # 任一标的波动率缺失/为 0 时退回等权
+                    v = {c: vols.at[d, c] for c in pending}
+                    if all(pd.notna(x) and x > 0 for x in v.values()):
+                        inv = {c: 1.0 / x for c, x in v.items()}
+                        tot_inv = sum(inv.values())
+                        scale = sum(pending.values())
+                        pending = {c: inv[c] / tot_inv * scale for c in pending}
+                        if (params.reb_band > 0
+                                and set(pending) == set(holdings)
+                                and all(abs(pending[c] - holdings[c])
+                                        <= params.reb_band for c in pending)):
+                            # 再平衡带：成分不变且偏离 ≤ band，维持现状不交易
+                            pending = holdings
         nav_idx.append(d)
         nav_val.append(nav)
 

@@ -31,6 +31,14 @@ class Params:
     atr_mult: float = 0.0     # ATR止损：收盘 < 持仓期最高收盘 - mult×ATR 则清仓(0=关闭)
     atr_n: int = 14           # ATR 窗口（Wilder 平滑）
     atr_mult_map: dict = None # 按标的定制ATR倍数 {code: mult}，优先于 atr_mult
+    threshold_exit: float = None  # 换出阈值(挑战者超过在持者+该边际即踢出，宜低)。
+                                  # None=与 threshold 相同，走原版单一阈值逻辑
+    vol_n: int = 0            # 逆波动率加权窗口(日收益率std)，0=关闭(等权)
+    weight_mode: str = "equal"  # 'equal' 等权(每日再平衡) / 'score' 换仓时按
+                                # 正分数比例定权重，成分不变则随价格漂移不再平衡
+    vol_smooth: int = 0       # 波动率 EMA 平滑半衰期(交易日)，0=不平滑
+    reb_band: float = 0.0     # 再平衡带：成分不变且各标的权重偏离目标 ≤ 该值
+                              # 则不交易(0=关闭，每日精确跟踪目标权重)
 
     @classmethod
     def with_window(cls, window: int, **kw):
