@@ -39,6 +39,8 @@ class Params:
     vol_smooth: int = 0       # 波动率 EMA 平滑半衰期(交易日)，0=不平滑
     reb_band: float = 0.0     # 再平衡带：成分不变且各标的权重偏离目标 ≤ 该值
                               # 则不交易(0=关闭，每日精确跟踪目标权重)
+    vol_short: int = 5        # 量能因子短期均量窗口
+    vol_long: int = 25        # 量能因子长期均量窗口（weights 传 4 个值时启用）
 
     @classmethod
     def with_window(cls, window: int, **kw):
@@ -74,6 +76,15 @@ def efficiency_momentum(df: pd.DataFrame, eff_n: int) -> float:
     return momentum * er
 
 
+def volume_momentum(volume: pd.Series, vol_short: int, vol_long: int) -> float:
+    """量能因子：近 vol_short 日均量 / 近 vol_long 日均量 - 1（0=无量能变化，正=放量）。"""
+    seg = volume.iloc[-vol_long:]
+    long_mean = seg.mean()
+    if not long_mean or long_mean <= 0:
+        return 0.0
+    return float(seg.iloc[-vol_short:].mean() / long_mean - 1.0)
+
+
 def factor_matrices(panel: dict, dates: pd.Index, params: Params) -> pd.DataFrame:
     """逐日逐标的计算三因子原始分，返回 MultiIndex 列 (factor, code) 的 DataFrame。
 
@@ -81,25 +92,34 @@ def factor_matrices(panel: dict, dates: pd.Index, params: Params) -> pd.DataFram
     的日期该标的因子为 NaN，横截面标准化时自动剔除（z-score 按 skipna 计算）。
     因子值只依赖窗口参数，不依赖权重/阈值，参数遍历时可复用。
     """
-    warmup = max(params.bias_n, params.slope_n, params.momentum_day, params.eff_n)
+    warmup = max(params.bias_n, params.slope_n, params.momentum_day,
+                 params.eff_n, params.vol_long)
+    with_vol = len(params.weights) >= 4  # weights 传 4 个值时启用量能因子
     cols = {}
     for code, df in panel.items():
         df = df.reindex(dates)
         close = df["close"]
         valid_cnt = close.notna().cumsum()  # 截至当日的自身有效K线数
-        b, s, e = [], [], []
+        b, s, e, v = [], [], [], []
         for i in range(len(dates)):
             if valid_cnt.iloc[i] < warmup:
-                b.append(np.nan); s.append(np.nan); e.append(np.nan)
+                b.append(np.nan); s.append(np.nan); e.append(np.nan); v.append(np.nan)
                 continue
             win_close = close.iloc[:i + 1].dropna()
             win_df = df.iloc[:i + 1].dropna(subset=["close"])
             b.append(bias_momentum(win_close, params.bias_n, params.momentum_day))
             s.append(slope_momentum(win_close, params.slope_n))
             e.append(efficiency_momentum(win_df, params.eff_n))
+            if with_vol:
+                v.append(volume_momentum(win_df["volume"],
+                                         params.vol_short, params.vol_long))
+            else:
+                v.append(np.nan)
         cols[("bias", code)] = b
         cols[("slope", code)] = s
         cols[("eff", code)] = e
+        if with_vol:
+            cols[("volr", code)] = v
     out = pd.DataFrame(cols, index=dates)
     out.columns = pd.MultiIndex.from_tuples(out.columns)
     return out
@@ -111,12 +131,13 @@ def composite_scores(factors: pd.DataFrame, weights: tuple) -> pd.DataFrame:
     未上市标的的 NaN 不参与标准化（mean/std 均 skipna），得分保留 NaN，
     选标的时视为不在池内。std=0（当日可选标的同分）时该因子得分置 0。
     """
+    names = ["bias", "slope", "eff", "volr"][:len(weights)]
     z = {}
-    for fac, w in zip(["bias", "slope", "eff"], weights):
+    for fac, w in zip(names, weights):
         f = factors[fac]
         std = f.std(axis=1).replace(0, np.nan)  # 标的同分时防除零
         zfac = f.sub(f.mean(axis=1), axis=0).div(std, axis=0)
         # std==0（或该因子当日无法标准化）的已有值置 0；未上市的 NaN 保留 NaN
         zfac = zfac.fillna(0.0).where(f.notna(), other=np.nan)
         z[fac] = zfac * w
-    return z["bias"] + z["slope"] + z["eff"]
+    return sum(z[fac] for fac in names)

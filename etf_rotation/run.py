@@ -58,7 +58,8 @@ def _parse_args(argv):
                    help="波动率EMA平滑半衰期(交易日)，如 10；0=不平滑")
     p.add_argument("--reb-band", type=float, default=0.0,
                    help="再平衡带（如 0.05：权重偏离≤5pp不交易）；0=关闭")
-    p.add_argument("--weights", default="0.3,0.3,0.4")
+    p.add_argument("--weights", default="0.3,0.3,0.4",
+                   help="因子权重：3个值=乖离/斜率/效率；4个值=追加量能(如 0.25,0.25,0.3,0.2)")
     p.add_argument("--window", type=int, default=25)
     p.add_argument("--codes", default="512890,159949,513100,518880,159985",
                    help="逗号分隔标的池，默认4只原版+豆粕")
@@ -69,7 +70,7 @@ def _parse_args(argv):
 
 def _params_from(args) -> Params:
     weights = tuple(float(x) for x in args.weights.split(","))
-    assert len(weights) == 3, "--weights 需要3个值，如 0.3,0.3,0.4"
+    assert len(weights) in (3, 4), "--weights 需要3或4个值，如 0.3,0.3,0.4 或 0.25,0.25,0.3,0.2"
     return Params.with_window(
         args.window, weights=weights, threshold=args.threshold,
         top_k=args.top_k, cash_rule=args.cash_rule, ma_n=args.ma_n,
