@@ -1,0 +1,15 @@
+# 数据文件（用户真实交易数据，不入库）
+trades.db
+*.db-journal
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# 输出目录（如有）
+output/
+
+# Windows
+Thumbs.db
+Desktop.ini

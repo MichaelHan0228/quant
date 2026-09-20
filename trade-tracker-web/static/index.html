@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>交易记录 · 股票魔法师统计口径</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+         background: #f4f5f7; color: #222; font-size: 14px; }
+  header { background: #1f3a5f; color: #fff; padding: 12px 16px; }
+  header h1 { margin: 0; font-size: 18px; }
+  #cheat { display: flex; gap: 16px; flex-wrap: wrap; background: #16304f;
+           color: #cfe0f5; padding: 8px 16px; font-size: 13px; }
+  #cheat b { color: #fff; font-size: 15px; margin-left: 4px; }
+  nav { display: flex; flex-wrap: wrap; background: #fff; border-bottom: 1px solid #ddd;
+        position: sticky; top: 0; z-index: 10; }
+  nav button { flex: 1 1 auto; border: none; background: none; padding: 12px 10px;
+               font-size: 14px; cursor: pointer; color: #555; border-bottom: 3px solid transparent; }
+  nav button.active { color: #1f3a5f; border-bottom-color: #1f3a5f; font-weight: bold; }
+  main { max-width: 1100px; margin: 0 auto; padding: 12px; }
+  section { display: none; }
+  section.active { display: block; }
+  .card { background: #fff; border: 1px solid #e2e2e2; border-radius: 6px;
+          padding: 14px; margin-bottom: 14px; }
+  .card h2 { margin: 0 0 10px; font-size: 15px; color: #1f3a5f; }
+  form .row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+  label { display: flex; flex-direction: column; font-size: 12px; color: #666; flex: 1 1 120px; }
+  input, select { padding: 7px 8px; border: 1px solid #ccc; border-radius: 4px;
+                  font-size: 14px; margin-top: 3px; width: 100%; }
+  button.btn { background: #1f3a5f; color: #fff; border: none; border-radius: 4px;
+               padding: 8px 18px; font-size: 14px; cursor: pointer; }
+  button.btn:hover { background: #2a4f7f; }
+  button.small { padding: 3px 10px; font-size: 12px; border-radius: 4px; border: none;
+                 cursor: pointer; margin-right: 4px; }
+  button.close-btn { background: #2e7d32; color: #fff; }
+  button.del-btn { background: #c62828; color: #fff; }
+  .table-wrap { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; white-space: nowrap; }
+  th, td { border: 1px solid #e0e0e0; padding: 6px 8px; text-align: right; }
+  th { background: #f0f3f8; color: #333; }
+  td.l, th.l { text-align: left; }
+  tr.holding td { background: #fff8e1; }
+  tr.avg td { background: #eaf0f8; font-weight: bold; }
+  .pos { color: #c62828; font-weight: bold; }   /* 盈利红 */
+  .neg { color: #2e7d32; font-weight: bold; }   /* 亏损绿 */
+  .msg { padding: 8px 10px; border-radius: 4px; margin-bottom: 10px; display: none; }
+  .msg.ok { display: block; background: #e8f5e9; color: #2e7d32; }
+  .msg.err { display: block; background: #ffebee; color: #c62828; }
+  .hint { font-size: 12px; color: #888; margin-top: 6px; line-height: 1.6; }
+  dialog { border: none; border-radius: 6px; padding: 16px; max-width: 90vw; }
+  dialog::backdrop { background: rgba(0,0,0,.35); }
+  a.dl { margin-right: 12px; color: #1f3a5f; }
+  @media (max-width: 640px) {
+    th, td { padding: 4px 5px; font-size: 12px; }
+    header h1 { font-size: 16px; }
+  }
+</style>
+</head>
+<body>
+<header><h1>交易记录 <span style="font-weight:normal;font-size:13px">· 《股票魔法师》统计口径</span></h1></header>
+<div id="cheat">今日小抄加载中…</div>
+<nav>
+  <button data-tab="entry" class="active">录入交易</button>
+  <button data-tab="trades">交易列表 / 持仓</button>
+  <button data-tab="daily">每日盈亏</button>
+  <button data-tab="report">月度报表</button>
+  <button data-tab="io">导入导出</button>
+</nav>
+<main>
+<div id="msg" class="msg"></div>
+
+<!-- 1. 录入交易 -->
+<section id="tab-entry" class="active">
+  <div class="card">
+    <h2>录入一笔交易</h2>
+    <form id="form-add">
+      <div class="row">
+        <label>代码 *<input name="code" required placeholder="600001"></label>
+        <label>名称<input name="name" placeholder="可选"></label>
+        <label>股数<input name="shares" type="number" min="0" placeholder="可选"></label>
+      </div>
+      <div class="row">
+        <label>买入日期 *<input name="buy_date" type="date" required></label>
+        <label>买入价 *<input name="buy_price" type="number" step="any" min="0" required></label>
+      </div>
+      <div class="row">
+        <label>卖出日期<input name="sell_date" type="date"></label>
+        <label>卖出价<input name="sell_price" type="number" step="any" min="0"></label>
+      </div>
+      <div class="row">
+        <label>备注<input name="note" placeholder="可选"></label>
+      </div>
+      <button class="btn" type="submit">提交</button>
+      <div class="hint">卖出日期与卖出价同时留空 = 持仓中；同时填写 = 直接录入一笔已平仓交易。</div>
+    </form>
+  </div>
+</section>
+
+<!-- 2. 交易列表 / 持仓管理 -->
+<section id="tab-trades">
+  <div class="card">
+    <h2>全部交易（黄色行 = 持仓中）</h2>
+    <div class="table-wrap"><table id="tbl-trades"></table></div>
+    <div class="hint">收益率 = (卖出价 − 买入价) / 买入价；<span class="pos">红色=盈利</span>，<span class="neg">绿色=亏损</span>，收益率为 0 不计盈亏但计入总交。</div>
+  </div>
+</section>
+
+<!-- 3. 每日盈亏 -->
+<section id="tab-daily">
+  <div class="card">
+    <h2>录入某日账户盈亏</h2>
+    <form id="form-day">
+      <div class="row">
+        <label>日期 *<input name="day" type="date" required></label>
+        <label>盈亏数值 *<input name="pnl" type="number" step="any" required placeholder="正涨负跌"></label>
+        <label>类型
+          <select name="kind"><option value="amount">金额（元）</option><option value="pct">涨跌幅（%）</option></select>
+        </label>
+        <label>备注<input name="note" placeholder="可选"></label>
+      </div>
+      <button class="btn" type="submit">保存</button>
+      <div class="hint">同一天重复保存会覆盖旧记录。统计上涨/下跌日只看正负号，平盘(0)两侧都不计。</div>
+    </form>
+  </div>
+  <div class="card">
+    <h2>盈亏记录</h2>
+    <div class="table-wrap"><table id="tbl-daily"></table></div>
+  </div>
+</section>
+
+<!-- 4. 月度报表 -->
+<section id="tab-report">
+  <div class="card">
+    <h2>月度报表</h2>
+    <div class="row" style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
+      <label style="max-width:120px">年份<input id="report-year" type="number" min="2000" max="2100"></label>
+      <button class="btn" id="btn-report">生成报表</button>
+    </div>
+  </div>
+  <div class="card">
+    <h2 id="report-title-m">月度交易记录</h2>
+    <div class="table-wrap"><table id="tbl-monthly"></table></div>
+    <div class="hint">"-" 表示该月无对应数据（如无盈利交易时平均收益/最大收益显示 "-"）；平均值行仅对有数据的月份取平均。</div>
+  </div>
+  <div class="card">
+    <h2 id="report-title-s">交易总结</h2>
+    <div class="table-wrap"><table id="tbl-summary"></table></div>
+  </div>
+</section>
+
+<!-- 5. 导入导出 -->
+<section id="tab-io">
+  <div class="card">
+    <h2>CSV 导入交易</h2>
+    <input type="file" id="file-csv" accept=".csv,text/csv">
+    <button class="btn" id="btn-import">上传导入</button>
+    <div class="hint">模板表头：code,name,buy_date,buy_price,sell_date,sell_price,shares,note<br>
+    sell_date / sell_price 留空表示持仓中；shares、note 可留空。</div>
+  </div>
+  <div class="card">
+    <h2>导出报表</h2>
+    <div class="row" style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
+      <label style="max-width:120px">年份<input id="export-year" type="number" min="2000" max="2100"></label>
+      <a class="dl" id="dl-csv" href="#">下载 CSV</a>
+      <a class="dl" id="dl-md" href="#">下载 Markdown</a>
+    </div>
+  </div>
+</section>
+</main>
+
+<!-- 平仓对话框 -->
+<dialog id="dlg-close">
+  <h3 style="margin-top:0">平仓 <span id="dlg-title"></span></h3>
+  <form id="form-close">
+    <div class="row" style="display:flex;gap:8px">
+      <label>卖出日期 *<input name="sell_date" type="date" required></label>
+      <label>卖出价 *<input name="sell_price" type="number" step="any" min="0" required></label>
+    </div>
+    <div style="margin-top:10px">
+      <button class="btn" type="submit">确认平仓</button>
+      <button class="btn" type="button" style="background:#888" onclick="document.getElementById('dlg-close').close()">取消</button>
+    </div>
+  </form>
+</dialog>
+
+<script>
+const $ = s => document.querySelector(s);
+let currentTab = 'entry';
+
+function showMsg(text, ok=true) {
+  const m = $('#msg');
+  m.textContent = text;
+  m.className = 'msg ' + (ok ? 'ok' : 'err');
+  clearTimeout(showMsg._t);
+  showMsg._t = setTimeout(() => { m.className = 'msg'; }, 4000);
+}
+
+async function api(path, opts={}) {
+  if (opts.body !== undefined && typeof opts.body !== 'string') {
+    opts.body = JSON.stringify(opts.body);
+    opts.headers = Object.assign({'Content-Type': 'application/json'}, opts.headers || {});
+  }
+  const r = await fetch(path, opts);
+  const ct = r.headers.get('Content-Type') || '';
+  const data = ct.includes('json') ? await r.json() : await r.text();
+  if (!r.ok) throw new Error((data && data.error) || ('HTTP ' + r.status));
+  return data;
+}
+
+const fmtPct = v => v === null || v === undefined ? '-' : v.toFixed(2) + '%';
+const fmtNum = v => v === null || v === undefined ? '-' : v.toFixed(2);
+const fmtDay = v => v === null || v === undefined ? '-' : (Number.isInteger(v) ? v : v.toFixed(1));
+function clsPct(v) { return v > 0 ? 'pos' : (v < 0 ? 'neg' : ''); }
+function esc(s) { const d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML; }
+
+// ---- 标签页切换 ----
+document.querySelectorAll('nav button').forEach(b => b.addEventListener('click', () => {
+  document.querySelectorAll('nav button').forEach(x => x.classList.remove('active'));
+  b.classList.add('active');
+  document.querySelectorAll('main section').forEach(s => s.classList.remove('active'));
+  currentTab = b.dataset.tab;
+  $('#tab-' + currentTab).classList.add('active');
+  if (currentTab === 'trades') loadTrades();
+  if (currentTab === 'daily') loadDaily();
+  if (currentTab === 'report') loadReport();
+  if (currentTab === 'io') syncExportLinks();
+}));
+
+// ---- 今日小抄 ----
+async function loadCheat() {
+  try {
+    const year = new Date().getFullYear();
+    const r = await api('/api/report?year=' + year);
+    const s = r.summary;
+    $('#cheat').innerHTML =
+      '<span>今日小抄（' + year + ' 年）</span>' +
+      '<span>成功百分比<b>' + fmtPct(s.win_pct) + '</b></span>' +
+      '<span>收益/风险比<b>' + fmtNum(s.ratio) + '</b></span>' +
+      '<span>调整后收益/风险比<b>' + fmtNum(s.adj_ratio) + '</b></span>' +
+      '<span>平仓<b>' + s.n_trades + '</b> 笔</span>';
+  } catch (e) { $('#cheat').textContent = '今日小抄加载失败：' + e.message; }
+}
+
+// ---- 录入交易 ----
+$('#form-add').addEventListener('submit', async e => {
+  e.preventDefault();
+  const f = e.target;
+  const body = {
+    code: f.code.value.trim(), name: f.name.value.trim(),
+    buy_date: f.buy_date.value, buy_price: f.buy_price.value,
+    sell_date: f.sell_date.value || null,
+    sell_price: f.sell_price.value || null,
+    shares: f.shares.value || null, note: f.note.value.trim(),
+  };
+  try {
+    const r = await api('/api/trades', {method: 'POST', body});
+    showMsg('已录入交易 #' + r.id + (body.sell_date ? '（已平仓）' : '（持仓中）'));
+    f.reset(); loadCheat();
+  } catch (err) { showMsg(err.message, false); }
+});
+
+// ---- 交易列表 ----
+async function loadTrades() {
+  try {
+    const {trades} = await api('/api/trades');
+    let h = '<tr><th>ID</th><th class="l">代码</th><th class="l">名称</th><th>买入日期</th><th>买入价</th>' +
+            '<th>卖出日期</th><th>卖出价</th><th>股数</th><th>收益率</th><th class="l">备注</th><th>操作</th></tr>';
+    for (const t of trades) {
+      h += '<tr class="' + (t.open ? 'holding' : '') + '">' +
+        '<td>' + t.id + '</td><td class="l">' + esc(t.code) + '</td><td class="l">' + esc(t.name || '-') + '</td>' +
+        '<td>' + t.buy_date + '</td><td>' + t.buy_price.toFixed(2) + '</td>' +
+        '<td>' + (t.sell_date || '持仓中') + '</td>' +
+        '<td>' + (t.sell_price === null ? '-' : t.sell_price.toFixed(2)) + '</td>' +
+        '<td>' + (t.shares === null ? '-' : t.shares) + '</td>' +
+        '<td class="' + clsPct(t.return_pct) + '">' + fmtPct(t.return_pct) + '</td>' +
+        '<td class="l">' + esc(t.note || '-') + '</td>' +
+        '<td>' + (t.open ? '<button class="small close-btn" onclick="openClose(' + t.id + ',\'' + esc(t.code) + '\')">平仓</button>' : '') +
+        '<button class="small del-btn" onclick="delTrade(' + t.id + ')">删除</button></td></tr>';
+    }
+    $('#tbl-trades').innerHTML = h || '<tr><td>暂无交易</td></tr>';
+  } catch (e) { showMsg(e.message, false); }
+}
+
+// ---- 平仓 ----
+let closingId = null;
+window.openClose = (id, code) => {
+  closingId = id;
+  $('#dlg-title').textContent = '#' + id + ' ' + code;
+  const f = $('#form-close');
+  f.reset();
+  f.sell_date.value = new Date().toISOString().slice(0, 10);
+  $('#dlg-close').showModal();
+};
+$('#form-close').addEventListener('submit', async e => {
+  e.preventDefault();
+  const f = e.target;
+  try {
+    const r = await api('/api/trades/' + closingId, {method: 'PATCH',
+      body: {sell_date: f.sell_date.value, sell_price: f.sell_price.value}});
+    $('#dlg-close').close();
+    showMsg('交易 #' + closingId + ' 已平仓，收益率 ' + fmtPct(r.trade.return_pct));
+    loadTrades(); loadCheat();
+  } catch (err) { showMsg(err.message, false); }
+});
+
+// ---- 删除 ----
+window.delTrade = async id => {
+  if (!confirm('确定删除交易 #' + id + ' 吗？此操作不可恢复。')) return;
+  try { await api('/api/trades/' + id, {method: 'DELETE'}); showMsg('已删除 #' + id); loadTrades(); loadCheat(); }
+  catch (e) { showMsg(e.message, false); }
+};
+window.delDay = async day => {
+  if (!confirm('确定删除 ' + day + ' 的盈亏记录吗？')) return;
+  try { await api('/api/daily/' + day, {method: 'DELETE'}); showMsg('已删除 ' + day); loadDaily(); }
+  catch (e) { showMsg(e.message, false); }
+};
+
+// ---- 每日盈亏 ----
+$('#form-day').addEventListener('submit', async e => {
+  e.preventDefault();
+  const f = e.target;
+  try {
+    await api('/api/daily', {method: 'POST',
+      body: {day: f.day.value, pnl: f.pnl.value, kind: f.kind.value, note: f.note.value.trim()}});
+    showMsg('已记录 ' + f.day.value + ' 盈亏');
+    f.reset(); loadDaily();
+  } catch (err) { showMsg(err.message, false); }
+});
+async function loadDaily() {
+  try {
+    const {days} = await api('/api/daily');
+    let h = '<tr><th>日期</th><th>盈亏</th><th class="l">类型</th><th class="l">备注</th><th>操作</th></tr>';
+    for (const d of days) {
+      h += '<tr><td>' + d.day + '</td>' +
+        '<td class="' + clsPct(d.pnl) + '">' + (d.pnl > 0 ? '+' : '') + d.pnl + (d.kind === 'pct' ? '%' : '') + '</td>' +
+        '<td class="l">' + (d.kind === 'pct' ? '涨跌幅' : '金额') + '</td>' +
+        '<td class="l">' + esc(d.note || '-') + '</td>' +
+        '<td><button class="small del-btn" onclick="delDay(\'' + d.day + '\')">删除</button></td></tr>';
+    }
+    $('#tbl-daily').innerHTML = days.length ? h : '<tr><td>暂无记录</td></tr>';
+  } catch (e) { showMsg(e.message, false); }
+}
+
+// ---- 月度报表 ----
+$('#btn-report').addEventListener('click', loadReport);
+async function loadReport() {
+  const year = $('#report-year').value || new Date().getFullYear();
+  try {
+    const r = await api('/api/report?year=' + year);
+    $('#report-title-m').textContent = year + ' 年月度交易记录';
+    $('#report-title-s').textContent = year + ' 年交易总结';
+    let h = '<tr><th class="l">月份</th><th>平均收益</th><th>平均亏损</th><th>成功百分比</th><th>总交</th>' +
+            '<th>最大收益</th><th>最大亏损</th><th>上涨日</th><th>下跌日</th></tr>';
+    const rowHtml = (st, isAvg) =>
+      '<tr' + (isAvg ? ' class="avg"' : '') + '><td class="l">' + st.month + '</td>' +
+      '<td class="' + clsPct(st.avg_win) + '">' + fmtPct(st.avg_win) + '</td>' +
+      '<td>' + fmtPct(st.avg_loss) + '</td>' +
+      '<td>' + fmtPct(st.win_pct) + '</td>' +
+      '<td>' + (isAvg ? '-' : st.n_trades) + '</td>' +
+      '<td class="' + clsPct(st.max_win) + '">' + fmtPct(st.max_win) + '</td>' +
+      '<td>' + fmtPct(st.max_loss) + '</td>' +
+      '<td>' + (isAvg ? fmtDay(st.up_days) : (st.n_days > 0 ? st.up_days : 0)) + '</td>' +
+      '<td>' + (isAvg ? fmtDay(st.down_days) : (st.n_days > 0 ? st.down_days : 0)) + '</td></tr>';
+    for (const m of r.months) h += rowHtml(m, false);
+    h += rowHtml(r.avg_row, true);
+    $('#tbl-monthly').innerHTML = h;
+    const s = r.summary;
+    $('#tbl-summary').innerHTML =
+      '<tr><th class="l">指标</th><th>值</th></tr>' +
+      '<tr><td class="l">成功百分比</td><td>' + fmtPct(s.win_pct) + '</td></tr>' +
+      '<tr><td class="l">平均收益</td><td class="' + clsPct(s.avg_win) + '">' + fmtPct(s.avg_win) + '</td></tr>' +
+      '<tr><td class="l">平均亏损</td><td>' + fmtPct(s.avg_loss) + '</td></tr>' +
+      '<tr><td class="l">收益/风险比</td><td>' + fmtNum(s.ratio) + '</td></tr>' +
+      '<tr><td class="l">调整后的收益/风险比</td><td>' + fmtNum(s.adj_ratio) + '</td></tr>' +
+      '<tr><td class="l">平仓笔数</td><td>' + s.n_trades + '</td></tr>';
+  } catch (e) { showMsg(e.message, false); }
+}
+
+// ---- 导入导出 ----
+$('#btn-import').addEventListener('click', async () => {
+  const file = $('#file-csv').files[0];
+  if (!file) return showMsg('请先选择 CSV 文件', false);
+  try {
+    const text = await file.text();
+    const r = await api('/api/import', {method: 'POST', body: text,
+      headers: {'Content-Type': 'text/csv; charset=utf-8'}});
+    showMsg('成功导入 ' + r.imported + ' 笔交易');
+    loadCheat();
+  } catch (e) { showMsg(e.message, false); }
+});
+function syncExportLinks() {
+  const y = $('#export-year').value || new Date().getFullYear();
+  $('#dl-csv').href = '/api/export?year=' + y + '&format=csv';
+  $('#dl-md').href = '/api/export?year=' + y + '&format=md';
+}
+$('#export-year').addEventListener('input', syncExportLinks);
+
+// ---- 初始化 ----
+const thisYear = new Date().getFullYear();
+$('#report-year').value = thisYear;
+$('#export-year').value = thisYear;
+syncExportLinks();
+loadCheat();
+</script>
+</body>
+</html>
